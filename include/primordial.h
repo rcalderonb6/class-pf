@@ -9,6 +9,7 @@
 
 enum primordial_spectrum_type {
                                analytic_Pk,
+                               binned_Pk,
                                two_scales,
                                inflation_V,
                                inflation_H,
@@ -156,6 +157,16 @@ struct primordial {
   double c_nid_niv; /**< NIDxNIV cross-correlation at pivot scale, from -1 to 1 */
   double n_nid_niv; /**< NIDxNIV cross-correlation tilt */
   double alpha_nid_niv; /**< NIDxNIV cross-correlation running */
+
+  /* parameters describing the case primordial_spec_type = binned_Pk */
+
+  double k_min_bin;  /**< minimum k for binned reconstruction in 1/Mpc */
+  double k_max_bin;  /**< maximum k for binned reconstruction in 1/Mpc */
+  int num_bins;      /**< number of bins for reconstruction */
+  double * bin_centers;    /**< array of bin center k values (log-spaced) */
+  double * bin_amplitudes; /**< array of delta values for each bin */
+  short binned_interp_mode;  /**< _SPLINE_NATURAL_ for cubic spline, 0 for linear */
+  double * bin_ddelta;       /**< second derivatives for spline (NULL if linear) */
 
   /** parameters describing the case primordial_spec_type = inflation_V */
 
@@ -382,6 +393,19 @@ extern "C" {
                                    double k,
                                    double * pk
                                    );
+
+  int primordial_binned_spectrum_init(
+                                      struct perturbations   * ppt,
+                                      struct primordial * ppm
+                                      );
+
+  int primordial_binned_spectrum(
+                                 struct primordial * ppm,
+                                 int index_md,
+                                 int index_ic1_ic2,
+                                 double k,
+                                 double * pk
+                                 );                                   
 
   int primordial_inflation_potential(
                                      struct primordial * ppm,

@@ -83,9 +83,15 @@ int primordial_spectrum_at_k(
 
   if ((lnk > ppm->lnk[ppm->lnk_size-1]) || (lnk < ppm->lnk[0])) {
 
-    class_test(ppm->primordial_spec_type != analytic_Pk,
-               ppm->error_message,
-               "k=%e out of range [%e : %e]",exp(lnk),exp(ppm->lnk[0]),exp(ppm->lnk[ppm->lnk_size-1]));
+    // class_test(ppm->primordial_spec_type != analytic_Pk,
+    //            ppm->error_message,
+    //            "k=%e out of range [%e : %e]",exp(lnk),exp(ppm->lnk[0]),exp(ppm->lnk[ppm->lnk_size-1]));
+
+
+    class_test((ppm->primordial_spec_type != analytic_Pk) && (ppm->primordial_spec_type != binned_Pk),
+           ppm->error_message,
+           "k=%e out of range [%e : %e]",exp(lnk),exp(ppm->lnk[0]),exp(ppm->lnk[ppm->lnk_size-1]));
+
 
     /* direct computation */
 
@@ -95,6 +101,26 @@ int primordial_spectrum_at_k(
         index_ic1_ic2 = index_symmetric_matrix(index_ic1,index_ic2,ppm->ic_size[index_md]);
 
         if (ppm->is_non_zero[index_md][index_ic1_ic2] == _TRUE_) {
+          
+          if (ppm->primordial_spec_type == analytic_Pk) {
+            class_call(primordial_analytic_spectrum(ppm,
+                                                    index_md,
+                                                    index_ic1_ic2,
+                                                    exp(lnk),
+                                                    &(output[index_ic1_ic2])),
+                       ppm->error_message,
+                       ppm->error_message);
+          }
+          else if (ppm->primordial_spec_type == binned_Pk) {
+            class_call(primordial_binned_spectrum(ppm,
+                                                   index_md,
+                                                   index_ic1_ic2,
+                                                   exp(lnk),
+                                                   &(output[index_ic1_ic2])),
+                       ppm->error_message,
+                       ppm->error_message);
+          }          
+
 
           class_call(primordial_analytic_spectrum(ppm,
                                                   index_md,
@@ -357,6 +383,65 @@ int primordial_init(
     }
   }
 
+
+  /** - deal with case of binned primordial spectrum */
+
+  else if (ppm->primordial_spec_type == binned_Pk) {
+
+    if (ppm->primordial_verbose > 0)
+      printf(" (binned spectrum reconstruction)\n");
+
+    class_call_except(primordial_binned_spectrum_init(ppt,
+                                                       ppm),
+                      ppm->error_message,
+                      ppm->error_message,
+                      primordial_free(ppm));
+
+    for (index_k = 0; index_k < ppm->lnk_size; index_k++) {
+
+      k=exp(ppm->lnk[index_k]);
+
+      for (index_md = 0; index_md < ppt->md_size; index_md++) {
+        for (index_ic1 = 0; index_ic1 < ppm->ic_size[index_md]; index_ic1++) {
+          for (index_ic2 = index_ic1; index_ic2 < ppm->ic_size[index_md]; index_ic2++) {
+
+            index_ic1_ic2 = index_symmetric_matrix(index_ic1,index_ic2,ppm->ic_size[index_md]);
+
+            if (ppm->is_non_zero[index_md][index_ic1_ic2] == _TRUE_) {
+
+              class_call(primordial_binned_spectrum(ppm,
+                                                     index_md,
+                                                     index_ic1_ic2,
+                                                     k,
+                                                     &pk),
+                         ppm->error_message,
+                         ppm->error_message);
+
+              if (index_ic1 == index_ic2) {
+
+                /* diagonal coefficients: ln[P(k)] */
+
+                ppm->lnpk[index_md][index_k*ppm->ic_ic_size[index_md]+index_ic1_ic2] = log(pk);
+              }
+              else {
+
+                /* non-diagonal coefficients: not supported for binned spectrum */
+
+                ppm->lnpk[index_md][index_k*ppm->ic_ic_size[index_md]+index_ic1_ic2] = 0.;
+              }
+            }
+            else {
+
+              /* non-diagonal coefficients when ic's are uncorrelated */
+
+              ppm->lnpk[index_md][index_k*ppm->ic_ic_size[index_md]+index_ic1_ic2] = 0.;
+            }
+          }
+        }
+      }
+    }
+  }
+
   /** - deal with case of inflation with given \f$V(\phi)\f$ or \f$H(\phi)\f$ */
 
   else if ((ppm->primordial_spec_type == inflation_V) || (ppm->primordial_spec_type == inflation_H) || (ppm->primordial_spec_type == inflation_V_end)) {
@@ -573,6 +658,21 @@ int primordial_free(
       free(ppm->amplitude);
       free(ppm->tilt);
       free(ppm->running);
+    }
+    else if (ppm->primordial_spec_type == binned_Pk) {
+      for (index_md = 0; index_md < ppm->md_size; index_md++) {
+        free(ppm->amplitude[index_md]);
+        free(ppm->tilt[index_md]);
+        free(ppm->running[index_md]);
+      }
+      free(ppm->amplitude);
+      free(ppm->tilt);
+      free(ppm->running);
+      free(ppm->bin_centers);
+      free(ppm->bin_amplitudes);
+      if (ppm->bin_ddelta != NULL) {
+        free(ppm->bin_ddelta);
+      }
     }
     else if (ppm->primordial_spec_type == external_Pk) {
       free(ppm->command);
@@ -958,6 +1058,212 @@ int primordial_analytic_spectrum(
   return _SUCCESS_;
 
 }
+
+
+
+/** RC: binned module **/
+
+/**
+ * This routine interprets and stores in a condensed form the input parameters
+ * for the binned reconstruction case, in such a way that later on, the spectrum
+ * can be obtained by a quick call to primordial_binned_spectrum()
+ *
+ * @param ppt  Input: pointer to perturbation structure
+ * @param ppm  Input/output: pointer to primordial structure
+ * @return the error status
+ */
+
+int primordial_binned_spectrum_init(
+                                    struct perturbations   * ppt,
+                                    struct primordial * ppm
+                                    ) {
+
+  int index_md,index_ic1,index_ic2;
+  int index_ic1_ic2;
+
+  /* Allocate amplitude, tilt, running arrays (only tilt and amplitude are used for binned) */
+  class_alloc(ppm->amplitude,
+              ppm->md_size*sizeof(double *),
+              ppm->error_message);
+
+  class_alloc(ppm->tilt,
+              ppm->md_size*sizeof(double *),
+              ppm->error_message);
+
+  class_alloc(ppm->running,
+              ppm->md_size*sizeof(double *),
+              ppm->error_message);
+
+  for (index_md = 0; index_md < ppm->md_size; index_md++) {
+
+    class_alloc(ppm->amplitude[index_md],
+                ppm->ic_ic_size[index_md]*sizeof(double),
+                ppm->error_message);
+
+    class_alloc(ppm->tilt[index_md],
+                ppm->ic_ic_size[index_md]*sizeof(double),
+                ppm->error_message);
+
+    class_alloc(ppm->running[index_md],
+                ppm->ic_ic_size[index_md]*sizeof(double),
+                ppm->error_message);
+  }
+
+  for (index_md = 0; index_md < ppm->md_size; index_md++) {
+
+    /* Store baseline power-law parameters for each initial condition */
+
+    for (index_ic1 = 0; index_ic1 < ppm->ic_size[index_md]; index_ic1++) {
+
+      if (_scalars_) {
+
+        if ((ppt->has_ad == _TRUE_) && (index_ic1 == ppt->index_ic_ad)) {
+          index_ic1_ic2 = index_symmetric_matrix(index_ic1,index_ic1,ppm->ic_size[index_md]);
+          ppm->amplitude[index_md][index_ic1_ic2] = ppm->A_s;
+          ppm->tilt[index_md][index_ic1_ic2] = ppm->n_s;
+          ppm->running[index_md][index_ic1_ic2] = 0.;
+          ppm->is_non_zero[index_md][index_ic1_ic2] = _TRUE_;
+        }
+      }
+
+      if (_tensors_) {
+
+        if ((ppt->has_tensors == _TRUE_) && (index_ic1 == ppt->index_ic_ten)) {
+          index_ic1_ic2 = index_symmetric_matrix(index_ic1,index_ic1,ppm->ic_size[index_md]);
+          ppm->amplitude[index_md][index_ic1_ic2] = ppm->r*ppm->A_s;
+          ppm->tilt[index_md][index_ic1_ic2] = ppm->n_t;
+          ppm->running[index_md][index_ic1_ic2] = 0.;
+          ppm->is_non_zero[index_md][index_ic1_ic2] = _TRUE_;
+        }
+      }
+    }
+  }
+
+  return _SUCCESS_;
+
+}
+
+/**
+ * This routine returns the primordial spectrum for the binned reconstruction case.
+ * It computes P(k) = P_powerlaw(k) * [1 + delta(k)] where delta(k) is interpolated
+ * from the bin values within the binning range and zero outside.
+ *
+ * @param ppm            Input/output: pointer to primordial structure
+ * @param index_md       Input: index of mode (scalar, tensor, ...)
+ * @param index_ic1_ic2  Input: pair of initial conditions (ic1, ic2)
+ * @param k              Input: wavenumber in same units as pivot scale, i.e. in 1/Mpc
+ * @param pk             Output: primordial power spectrum
+ * @return the error status
+ */
+int primordial_binned_spectrum(
+                               struct primordial * ppm,
+                               int index_md,
+                               int index_ic1_ic2,
+                               double k,
+                               double * pk
+                               ) {
+
+  double P_powerlaw;
+  double delta_k;
+  int i_bin;
+  double log_k, log_k_left, log_k_right;
+  double delta_left, delta_right;
+
+  if (ppm->is_non_zero[index_md][index_ic1_ic2] == _TRUE_) {
+    
+    /* Compute the baseline power-law spectrum */
+    P_powerlaw = ppm->amplitude[index_md][index_ic1_ic2]
+      * exp((ppm->tilt[index_md][index_ic1_ic2]-1.) * log(k/ppm->k_pivot));
+
+    /* Check if k is within the binning range */
+    if (k < ppm->k_min_bin || k > ppm->k_max_bin) {
+      /* Outside binning range: delta = 0, return pure power-law */
+      delta_k = 0.;
+    }
+    else {
+      /* Inside binning range: interpolate delta(k) */
+      
+      if (ppm->binned_interp_mode == -1) {
+        /* LINEAR INTERPOLATION in log(k) space (original method) */
+        
+        log_k = log(k);
+        
+        /* Find which bin k belongs to */
+        delta_k = 0.;
+        
+        for (i_bin = 0; i_bin < ppm->num_bins - 1; i_bin++) {
+          log_k_left = log(ppm->bin_centers[i_bin]);
+          log_k_right = log(ppm->bin_centers[i_bin + 1]);
+          
+          if (log_k >= log_k_left && log_k <= log_k_right) {
+            /* Linear interpolation between bins */
+            delta_left = ppm->bin_amplitudes[i_bin];
+            delta_right = ppm->bin_amplitudes[i_bin + 1];
+            delta_k = delta_left + (delta_right - delta_left) * 
+                      (log_k - log_k_left) / (log_k_right - log_k_left);
+            break;
+          }
+        }
+        
+        /* Handle edge cases: k in first or last bin */
+        if (k <= ppm->bin_centers[0]) {
+          delta_k = ppm->bin_amplitudes[0];
+        }
+        else if (k >= ppm->bin_centers[ppm->num_bins - 1]) {
+          delta_k = ppm->bin_amplitudes[ppm->num_bins - 1];
+        }
+      }
+      else {
+        /* CUBIC SPLINE INTERPOLATION in log(k) space (matches linear method's coordinate system) */
+        
+        log_k = log(k);
+        
+        /* Find interval containing log(k) */
+        i_bin = 0;
+        while (i_bin < ppm->num_bins - 1 && log_k > log(ppm->bin_centers[i_bin + 1])) {
+          i_bin++;
+        }
+        
+        if (i_bin == ppm->num_bins - 1) {
+          /* Beyond last bin center: use last value */
+          delta_k = ppm->bin_amplitudes[ppm->num_bins - 1];
+        }
+        else {
+          /* Cubic spline evaluation in log(k) space using CLASS macro */
+          double log_k_left = log(ppm->bin_centers[i_bin]);
+          double log_k_right = log(ppm->bin_centers[i_bin + 1]);
+          double h = log_k_right - log_k_left;
+          double a = (log_k_right - log_k) / h;
+          double b = (log_k - log_k_left) / h;
+          
+          delta_k = array_spline_eval(ppm->bin_amplitudes,
+                                       ppm->bin_ddelta,
+                                       i_bin,
+                                       i_bin + 1,
+                                       h, a, b);
+        }
+        
+        /* Handle edge cases: k before first or after last bin */
+        if (k <= ppm->bin_centers[0]) {
+          delta_k = ppm->bin_amplitudes[0];
+        }
+        else if (k >= ppm->bin_centers[ppm->num_bins - 1]) {
+          delta_k = ppm->bin_amplitudes[ppm->num_bins - 1];
+        }
+      }
+    }
+    
+    /* Return P(k) = P_powerlaw * (1 + delta) */
+    *pk = P_powerlaw * (1. + delta_k);
+  }
+  else {
+    *pk = 0.;
+  }
+
+  return _SUCCESS_;
+
+}
+
 
 /**
  * This routine encodes the inflaton scalar potential

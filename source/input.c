@@ -4137,6 +4137,9 @@ int input_read_parameters_primordial(struct file_content * pfc,
     if (strcmp(string1,"analytic_Pk") == 0){
       ppm->primordial_spec_type = analytic_Pk;
     }
+    else if (strcmp(string1,"binned_Pk") ==0){
+      ppm->primordial_spec_type = binned_Pk;
+    }
     else if (strcmp(string1,"inflation_V") == 0){
       ppm->primordial_spec_type = inflation_V;
     }
@@ -4154,7 +4157,7 @@ int input_read_parameters_primordial(struct file_content * pfc,
     }
     else{
       class_stop(errmsg,
-                 "You specified 'P_k_ini_type' as '%s'. It has to be one of {'analytic_Pk','inflation_V','inflation_V_end','two_scales','external_Pk'}.",string1);
+                 "You specified 'P_k_ini_type' as '%s'. It has to be one of {'analytic_Pk','binned_Pk','inflation_V','inflation_V_end','two_scales','external_Pk'}.",string1);
     }
   }
 
@@ -4309,6 +4312,178 @@ int input_read_parameters_primordial(struct file_content * pfc,
       }
     }
   }
+
+/** 1.c) For type 'binned_Pk' */
+  else if (ppm->primordial_spec_type == binned_Pk) {
+
+    /** 1.c.1) For scalar perturbations */
+    if (ppt->has_scalars == _TRUE_) {
+      
+      /* Read baseline power-law parameters */
+      class_call(parser_read_double(pfc,"A_s",&param1,&flag1,errmsg),
+                 errmsg,
+                 errmsg);
+      class_call(parser_read_double(pfc,"ln_A_s_1e10",&param2,&flag2,errmsg),
+                 errmsg,
+                 errmsg);
+      class_test(class_at_least_two_of_three(flag1,flag2,_FALSE_),
+                 errmsg,
+                 "In input file, you can only enter one of {'A_s', 'ln_A_s_1e10'}, choose one");
+      
+      if (flag1 == _TRUE_){
+        ppm->A_s = param1;
+      }
+      else if (flag2 == _TRUE_){
+        ppm->A_s = exp(param2)*1.e-10;
+      }
+      
+      class_read_double("n_s",ppm->n_s);
+      
+      /* Read binning parameters */
+      class_read_double("k_min_bin",ppm->k_min_bin);
+      class_read_double("k_max_bin",ppm->k_max_bin);
+      class_read_int("num_bins",ppm->num_bins);
+      
+      /* Validate binning parameters */
+      class_test(ppm->k_min_bin <= 0.,
+                 errmsg,
+                 "k_min_bin must be positive");
+      class_test(ppm->k_max_bin <= ppm->k_min_bin,
+                 errmsg,
+                 "k_max_bin must be greater than k_min_bin");
+      class_test(ppm->num_bins <= 0,
+                 errmsg,
+                 "num_bins must be positive");
+      
+      /* Allocate arrays for bins */
+      class_alloc(ppm->bin_centers,
+                  ppm->num_bins*sizeof(double),
+                  errmsg);
+      class_alloc(ppm->bin_amplitudes,
+                  ppm->num_bins*sizeof(double),
+                  errmsg);
+      
+      /* Compute bin centers (logarithmically spaced) */
+      double log10_k_min = log10(ppm->k_min_bin);
+      double log10_k_max = log10(ppm->k_max_bin);
+      double delta_log10_k = (log10_k_max - log10_k_min) / ppm->num_bins;
+      
+      int i_bin;
+      char bin_param_name[_ARGUMENT_LENGTH_MAX_];
+      
+      for (i_bin = 0; i_bin < ppm->num_bins; i_bin++) {
+        /* Compute bin center */
+        ppm->bin_centers[i_bin] = pow(10., log10_k_min + (i_bin + 0.5) * delta_log10_k);
+        
+        /* Read bin amplitude delta_i */
+        sprintf(bin_param_name, "delta_%d", i_bin + 1);
+        class_call(parser_read_double(pfc, bin_param_name, &(ppm->bin_amplitudes[i_bin]), &flag1, errmsg),
+                   errmsg,
+                   errmsg);
+        
+        /* If not specified, default to zero */
+        if (flag1 == _FALSE_) {
+          ppm->bin_amplitudes[i_bin] = 0.0;
+        }
+      }
+      
+      /* Read interpolation method (optional, default is linear for backward compatibility) */
+      class_call(parser_read_string(pfc,
+                                     "binned_interp",
+                                     &string1,
+                                     &flag1,
+                                     errmsg),
+                 errmsg,
+                 errmsg);
+      
+      if (flag1 == _TRUE_) {
+        if (strcmp(string1, "spline") == 0) {
+          ppm->binned_interp_mode = _SPLINE_NATURAL_;
+        }
+        else if (strcmp(string1, "linear") == 0) {
+          ppm->binned_interp_mode = -1;  /* -1 for linear mode */
+        }
+        else {
+          class_stop(errmsg, "binned_interp must be 'linear' or 'spline', got '%s'", string1);
+        }
+      }
+      else {
+        ppm->binned_interp_mode = -1;  /* default: linear */
+      }
+      
+      /* If spline mode, compute second derivatives in log(k) space */
+      if (ppm->binned_interp_mode == _SPLINE_NATURAL_) {
+        class_alloc(ppm->bin_ddelta,
+                    ppm->num_bins * sizeof(double),
+                    ppm->error_message);
+        
+        /* Create temporary array of log(k) values for spline computation */
+        double * log_bin_centers;
+        class_alloc(log_bin_centers,
+                    ppm->num_bins * sizeof(double),
+                    ppm->error_message);
+        
+        for (i_bin = 0; i_bin < ppm->num_bins; i_bin++) {
+          log_bin_centers[i_bin] = log(ppm->bin_centers[i_bin]);
+        }
+        
+        /* Compute spline coefficients in log(k) space */
+        class_call(array_spline_table_columns(
+                     log_bin_centers,      /* x values in log(k) */
+                     ppm->num_bins,        /* size */
+                     ppm->bin_amplitudes,  /* y values (delta) */
+                     1,                    /* single column */
+                     ppm->bin_ddelta,      /* output: second derivatives */
+                     _SPLINE_NATURAL_,     /* boundary condition */
+                     ppm->error_message),
+                   ppm->error_message,
+                   ppm->error_message);
+        
+        free(log_bin_centers);
+      }
+      else {
+        ppm->bin_ddelta = NULL;
+      }
+      
+      if (ppm->primordial_verbose > 0) {
+        printf("Binned primordial spectrum with %d bins from k = %e to %e Mpc^-1\n", 
+               ppm->num_bins, ppm->k_min_bin, ppm->k_max_bin);
+        printf("Interpolation mode: %s\n", ppm->binned_interp_mode == _SPLINE_NATURAL_ ? "cubic spline" : "linear");
+      }
+    }
+    
+    /** 1.c.2) For tensor perturbations */
+    if (ppt->has_tensors == _TRUE_){
+      class_read_double("r",ppm->r);
+      if (ppt->has_scalars == _FALSE_){
+        class_read_double("A_s",ppm->A_s);
+      }
+      if (ppm->r <= 0) {
+        ppt->has_tensors = _FALSE_;
+      }
+      else {
+        class_call(parser_read_string(pfc,"n_t",&string1,&flag1,errmsg),
+                   errmsg,
+                   errmsg);
+        class_call(parser_read_string(pfc,"alpha_t",&string2,&flag2,errmsg),
+                   errmsg,
+                   errmsg);
+        if ((flag1 == _TRUE_) && !((strstr(string1,"SCC") != NULL) || (strstr(string1,"scc") != NULL))){
+          class_read_double("n_t",ppm->n_t);
+        }
+        else {
+          ppm->n_t = -ppm->r/8.*(2.-ppm->r/8.-ppm->n_s);
+        }
+        if ((flag2 == _TRUE_) && !((strstr(string2,"SCC") != NULL) || (strstr(string2,"scc") != NULL))) {
+          class_read_double("alpha_t",ppm->alpha_t);
+        }
+        else {
+          ppm->alpha_t = ppm->r/8.*(ppm->r/8.+ppm->n_s-1.);
+        }
+      }
+    }
+  }
+
 
   else if ((ppm->primordial_spec_type == inflation_V) || (ppm->primordial_spec_type == inflation_H)) {
 
@@ -6091,6 +6266,13 @@ int input_default_params(struct background *pba,
   ppm->phi_pivot_target = 60;
   /** 1.e.5) Nomral numerical integration or analytical slow-roll formulas? */
   ppm->behavior=numerical;
+    /**1.f.3) For type 'binned_Pk' */
+  ppm->k_min_bin = 1.e-2;
+  ppm->k_max_bin = 1.e-1;
+  ppm->num_bins = 10;
+  ppm->bin_centers = NULL;
+  ppm->bin_amplitudes = NULL;
+  
   /** 1.g) For type 'external_Pk' */
   /** 1.g.1) Command generating the table */
   ppm->command=NULL;//"write here your command for the external Pk"
