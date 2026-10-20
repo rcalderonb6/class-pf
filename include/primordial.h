@@ -167,6 +167,10 @@ struct primordial {
   double * bin_amplitudes; /**< array of delta values for each bin */
   short binned_interp_mode;  /**< _SPLINE_NATURAL_ for cubic spline, 0 for linear */
   double * bin_ddelta;       /**< second derivatives for spline (NULL if linear) */
+  int binned_index_md;       /**< mode (scalars) carrying the binned spectrum, set at init */
+  int binned_index_ic1_ic2;  /**< adiabatic auto-correlation pair carrying the binned spectrum, set at init */
+  short binned_Pk_direct;    /**< evaluate the binned spectrum directly at each k instead of splining the ln P table */
+  short binned_Pk_responses; /**< compute per-bin response C_l in the harmonic module */
 
   /** parameters describing the case primordial_spec_type = inflation_V */
 
@@ -405,7 +409,16 @@ extern "C" {
                                  int index_ic1_ic2,
                                  double k,
                                  double * pk
-                                 );                                   
+                                 );
+
+  int primordial_binned_basis_at_k(
+                                   struct primordial * ppm,
+                                   int index_md,
+                                   int index_ic1_ic2,
+                                   double k,
+                                   int index_basis,
+                                   double * pk
+                                   );                                   
 
   int primordial_inflation_potential(
                                      struct primordial * ppm,

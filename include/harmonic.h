@@ -114,6 +114,12 @@ struct harmonic {
   double ** cl;   /**< table of anisotropy spectra for each mode, multipole, pair of initial conditions and types, cl[index_md][(index_l * phr->ic_ic_size[index_md] + index_ic1_ic2) * phr->ct_size + index_ct] */
   double ** ddcl; /**< second derivatives of previous table with respect to l, in view of spline interpolation */
 
+  short has_binned_responses; /**< were per-bin response C_l of a binned primordial spectrum computed? (binned_Pk_responses) */
+  int resp_size;              /**< number of response spectra: num_bins+1 (basis b_0 = power law, then one per bin) */
+  int resp_index_md;          /**< mode (scalars) of the response spectra */
+  double * cl_resp;           /**< response spectra of the scalar adiabatic mode, cl_resp[(index_l * phr->resp_size + index_b) * phr->ct_size + index_ct], without the factor A_s */
+  double * ddcl_resp;         /**< second derivatives of previous table with respect to l */
+
   //@}
 
   /** @name - technical parameters */
@@ -207,8 +213,24 @@ extern "C" {
                           double * cl_integrand_limber,
                           double * primordial_pk,
                           double * transfer_ic1,
-                          double * transfer_ic2
+                          double * transfer_ic2,
+                          int index_basis
                           );
+
+  int harmonic_primordial_at_k(
+                               struct primordial * ppm,
+                               struct harmonic * phr,
+                               int index_md,
+                               double k,
+                               int index_basis,
+                               double * primordial_pk
+                               );
+
+  int harmonic_cl_resp_at_l(
+                            struct harmonic * phr,
+                            double l,
+                            double * cl_resp
+                            );
 
   int harmonic_k_and_tau(
                          struct background * pba,

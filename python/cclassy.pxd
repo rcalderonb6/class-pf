@@ -355,6 +355,8 @@ cdef extern from "class.h":
         int index_ct_tl
         int * l_size
         int index_md_scalars
+        short has_binned_responses
+        int resp_size
 
     cdef struct output:
         ErrorMsg error_message
@@ -493,6 +495,7 @@ cdef extern from "class.h":
     int primordial_output_data(void *ppt, void *ppm, int number_of_titles, double *data)
 
     int harmonic_cl_at_l(void* phr,double l,double * cl,double * * cl_md,double * * cl_md_ic)
+    int harmonic_cl_resp_at_l(void* phr,double l,double * cl_resp)
     int lensing_cl_at_l(void * ple,int l,double * cl_lensed)
 
     int harmonic_pk_at_z(

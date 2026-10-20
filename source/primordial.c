@@ -81,7 +81,10 @@ int primordial_spectrum_at_k(
   /** - if ln(k) is not in the interpolation range, return an error, unless
       we are in the case of a analytic spectrum, for which a direct computation is possible */
 
-  if ((lnk > ppm->lnk[ppm->lnk_size-1]) || (lnk < ppm->lnk[0])) {
+  /* binned_Pk with binned_Pk_direct = yes: evaluate the binned formula at every k
+     instead of splining ln P from the table (exact linear interpolation in ln k) */
+  if ((lnk > ppm->lnk[ppm->lnk_size-1]) || (lnk < ppm->lnk[0]) ||
+      ((ppm->primordial_spec_type == binned_Pk) && (ppm->binned_Pk_direct == _TRUE_))) {
 
     // class_test(ppm->primordial_spec_type != analytic_Pk,
     //            ppm->error_message,
@@ -119,16 +122,7 @@ int primordial_spectrum_at_k(
                                                    &(output[index_ic1_ic2])),
                        ppm->error_message,
                        ppm->error_message);
-          }          
-
-
-          class_call(primordial_analytic_spectrum(ppm,
-                                                  index_md,
-                                                  index_ic1_ic2,
-                                                  exp(lnk),
-                                                  &(output[index_ic1_ic2])),
-                     ppm->error_message,
-                     ppm->error_message);
+          }
         }
         else {
           output[index_ic1_ic2] = 0.;
@@ -1109,6 +1103,9 @@ int primordial_binned_spectrum_init(
                 ppm->error_message);
   }
 
+  ppm->binned_index_md = -1;
+  ppm->binned_index_ic1_ic2 = -1;
+
   for (index_md = 0; index_md < ppm->md_size; index_md++) {
 
     /* Store baseline power-law parameters for each initial condition */
@@ -1123,6 +1120,9 @@ int primordial_binned_spectrum_init(
           ppm->tilt[index_md][index_ic1_ic2] = ppm->n_s;
           ppm->running[index_md][index_ic1_ic2] = 0.;
           ppm->is_non_zero[index_md][index_ic1_ic2] = _TRUE_;
+          /* the binned reconstruction (and its response basis) applies to this pair */
+          ppm->binned_index_md = index_md;
+          ppm->binned_index_ic1_ic2 = index_ic1_ic2;
         }
       }
 
@@ -1264,6 +1264,90 @@ int primordial_binned_spectrum(
 
 }
 
+
+/**
+ * This routine returns one basis function of the binned primordial spectrum,
+ * for computing response spectra (binned_Pk_responses = yes).
+ *
+ * With linear interpolation, the binned spectrum is linear in the bin amplitudes:
+ * P(k) = A_s [ b_0(k) + sum_i delta_i b_i(k) ], with b_0(k) = (k/k_pivot)^(n_s-1) and
+ * b_i(k) = b_0(k) h_i(ln k), where h_i is the interpolation weight of bin i used by
+ * primordial_binned_spectrum() (hat functions in ln k between bin centers, flat to
+ * k_min_bin / k_max_bin for the first / last bin, zero outside the binning range).
+ * Only the scalar adiabatic auto-spectrum has a basis; other modes and pairs return 0.
+ *
+ * @param ppm            Input: pointer to primordial structure
+ * @param index_md       Input: index of mode
+ * @param index_ic1_ic2  Input: pair of initial conditions
+ * @param k              Input: wavenumber in 1/Mpc
+ * @param index_basis    Input: 0 for b_0, i = 1..num_bins for b_i
+ * @param pk             Output: basis function value (without A_s)
+ * @return the error status
+ */
+int primordial_binned_basis_at_k(
+                                 struct primordial * ppm,
+                                 int index_md,
+                                 int index_ic1_ic2,
+                                 double k,
+                                 int index_basis,
+                                 double * pk
+                                 ) {
+
+  double b0, h, log_k, log_c, log_cm, log_cp;
+  int i_bin, n;
+
+  *pk = 0.;
+  if ((index_md != ppm->binned_index_md) ||
+      (index_ic1_ic2 != ppm->binned_index_ic1_ic2) ||
+      (ppm->is_non_zero[index_md][index_ic1_ic2] == _FALSE_)) {
+    return _SUCCESS_;
+  }
+
+  n = ppm->num_bins;
+  class_test((index_basis < 0) || (index_basis > n),
+             ppm->error_message,
+             "index_basis = %d out of range [0, %d]",index_basis,n);
+
+  b0 = exp((ppm->tilt[index_md][index_ic1_ic2]-1.) * log(k/ppm->k_pivot));
+
+  if (index_basis == 0) {
+    *pk = b0;
+    return _SUCCESS_;
+  }
+
+  if (k < ppm->k_min_bin || k > ppm->k_max_bin) {
+    return _SUCCESS_;
+  }
+
+  i_bin = index_basis - 1;
+  log_k = log(k);
+  log_c = log(ppm->bin_centers[i_bin]);
+
+  /* plateaus between the range edges and the outer bin centers (same comparisons as
+     primordial_binned_spectrum, which assigns these regions to the first/last bin) */
+  if (k <= ppm->bin_centers[0]) {
+    h = (i_bin == 0) ? 1. : 0.;
+  }
+  else if (k >= ppm->bin_centers[n-1]) {
+    h = (i_bin == n-1) ? 1. : 0.;
+  }
+  else if ((i_bin > 0) && (log_k >= log(ppm->bin_centers[i_bin-1])) && (log_k <= log_c)) {
+    /* rising edge: k in [c_{i-1}, c_i] */
+    log_cm = log(ppm->bin_centers[i_bin-1]);
+    h = (log_k - log_cm) / (log_c - log_cm);
+  }
+  else if ((i_bin < n-1) && (log_k >= log_c) && (log_k <= log(ppm->bin_centers[i_bin+1]))) {
+    /* falling edge: k in [c_i, c_{i+1}] */
+    log_cp = log(ppm->bin_centers[i_bin+1]);
+    h = (log_cp - log_k) / (log_cp - log_c);
+  }
+  else {
+    h = 0.;
+  }
+
+  *pk = b0 * h;
+  return _SUCCESS_;
+}
 
 /**
  * This routine encodes the inflaton scalar potential
