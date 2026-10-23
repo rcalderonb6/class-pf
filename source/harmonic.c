@@ -271,6 +271,14 @@ int harmonic_init(
 
   /** Summary: */
 
+  /** - binned-P(k) response spectra are off unless requested (see harmonic_cls()) */
+
+  phr->has_binned_responses = _FALSE_;
+  phr->resp_size = 0;
+  phr->resp_index_md = -1;
+  phr->cl_resp = NULL;
+  phr->ddcl_resp = NULL;
+
   /** - check that we really want to compute at least one spectrum */
 
   if (ppt->has_cls == _FALSE_) {
@@ -348,6 +356,11 @@ int harmonic_free(
       free(phr->l_max);
       free(phr->cl);
       free(phr->ddcl);
+    }
+
+    if (phr->has_binned_responses == _TRUE_) {
+      free(phr->cl_resp);
+      free(phr->ddcl_resp);
     }
 
     for (index_md=0; index_md < phr->md_size; index_md++)
@@ -690,6 +703,19 @@ int harmonic_cls(
   phr->l_size_max = ptr->l_size_max;
   class_alloc(phr->l,sizeof(double)*phr->l_size_max,phr->error_message);
 
+  /** - binned-P(k) responses: one extra C_l per basis function b_0 ... b_N of the binned
+      primordial spectrum, for the scalar adiabatic spectrum only (see
+      primordial_binned_basis_at_k()) */
+
+  if ((ppm->primordial_spec_type == binned_Pk) && (ppm->binned_Pk_responses == _TRUE_)) {
+    class_test(ppm->binned_index_md < 0,
+               phr->error_message,
+               "binned_Pk_responses requires adiabatic scalar perturbations");
+    phr->has_binned_responses = _TRUE_;
+    phr->resp_size = ppm->num_bins + 1;
+    phr->resp_index_md = ppm->binned_index_md;
+  }
+
   /** - store values of l */
   for (index_l=0; index_l < phr->l_size_max; index_l++) {
     phr->l[index_l] = (double)ptr->l[index_l];
@@ -708,6 +734,11 @@ int harmonic_cls(
     class_alloc(phr->cl[index_md],sizeof(double)*phr->l_size[index_md]*phr->ct_size*phr->ic_ic_size[index_md],phr->error_message);
     class_alloc(phr->ddcl[index_md],sizeof(double)*phr->l_size[index_md]*phr->ct_size*phr->ic_ic_size[index_md],phr->error_message);
     cl_integrand_num_columns = 1+phr->ct_size*2; /* one for k, ct_size for each type, ct_size for each second derivative of each type */
+
+    if ((phr->has_binned_responses == _TRUE_) && (index_md == phr->resp_index_md)) {
+      class_alloc(phr->cl_resp,sizeof(double)*phr->l_size[index_md]*phr->resp_size*phr->ct_size,phr->error_message);
+      class_alloc(phr->ddcl_resp,sizeof(double)*phr->l_size[index_md]*phr->resp_size*phr->ct_size,phr->error_message);
+    }
 
     /** - --> (c) loop over initial conditions */
 
@@ -774,9 +805,38 @@ int harmonic_cls(
                                              cl_integrand_limber,
                                              primordial_pk,
                                              transfer_ic1,
-                                             transfer_ic2),
+                                             transfer_ic2,
+                                             -1),
                          phr->error_message,
                          phr->error_message);
+
+              /* same k-integral with P(k) replaced by each basis function */
+              if ((phr->has_binned_responses == _TRUE_) &&
+                  (index_md == phr->resp_index_md) &&
+                  (index_ic1_ic2 == ppm->binned_index_ic1_ic2)) {
+                int index_b;
+                for (index_b = 0; index_b < phr->resp_size; index_b++) {
+                  class_call(harmonic_compute_cl(ppr,
+                                                 pba,
+                                                 ppt,
+                                                 ptr,
+                                                 ppm,
+                                                 phr,
+                                                 index_md,
+                                                 index_ic1,
+                                                 index_ic2,
+                                                 index_l,
+                                                 cl_integrand_num_columns,
+                                                 cl_integrand,
+                                                 cl_integrand_limber,
+                                                 primordial_pk,
+                                                 transfer_ic1,
+                                                 transfer_ic2,
+                                                 index_b),
+                             phr->error_message,
+                             phr->error_message);
+                }
+              }
 
               free(cl_integrand);
               if (ptr->do_lcmb_full_limber == _TRUE_) {
@@ -821,10 +881,126 @@ int harmonic_cls(
                                         phr->error_message),
                phr->error_message,
                phr->error_message);
+
+    if ((phr->has_binned_responses == _TRUE_) && (index_md == phr->resp_index_md)) {
+      class_call(array_spline_table_lines(phr->l,
+                                          phr->l_size[index_md],
+                                          phr->cl_resp,
+                                          phr->resp_size*phr->ct_size,
+                                          phr->ddcl_resp,
+                                          _SPLINE_EST_DERIV_,
+                                          phr->error_message),
+                 phr->error_message,
+                 phr->error_message);
+    }
   }
 
   return _SUCCESS_;
 
+}
+
+/**
+ * Primordial spectrum for the k-integrals of harmonic_compute_cl(): the usual
+ * primordial_spectrum_at_k() (index_basis < 0), or basis function index_basis of the
+ * binned spectrum for all pairs of initial conditions (index_basis >= 0, see
+ * primordial_binned_basis_at_k()).
+ *
+ * @param ppm           Input: pointer to primordial structure
+ * @param phr           Input: pointer to harmonic structure (for error messages)
+ * @param index_md      Input: index of mode
+ * @param k             Input: wavenumber in 1/Mpc
+ * @param index_basis   Input: -1 for P(k), 0..num_bins for a basis function
+ * @param primordial_pk Output: array with argument primordial_pk[index_ic1_ic2]
+ * @return the error status
+ */
+
+int harmonic_primordial_at_k(
+                             struct primordial * ppm,
+                             struct harmonic * phr,
+                             int index_md,
+                             double k,
+                             int index_basis,
+                             double * primordial_pk
+                             ) {
+
+  int index_ic1_ic2;
+
+  if (index_basis < 0) {
+    class_call(primordial_spectrum_at_k(ppm,index_md,linear,k,primordial_pk),
+               ppm->error_message,
+               phr->error_message);
+  }
+  else {
+    class_test(k <= 0.,
+               phr->error_message,
+               "k = %e",k);
+    for (index_ic1_ic2 = 0; index_ic1_ic2 < phr->ic_ic_size[index_md]; index_ic1_ic2++) {
+      class_call(primordial_binned_basis_at_k(ppm,index_md,index_ic1_ic2,k,index_basis,&(primordial_pk[index_ic1_ic2])),
+                 ppm->error_message,
+                 phr->error_message);
+    }
+  }
+
+  return _SUCCESS_;
+}
+
+/**
+ * Response C_l of all types for all basis functions of the binned primordial spectrum,
+ * interpolated at l (scalar adiabatic spectrum, unlensed, without the factor A_s).
+ * Requires binned_Pk_responses = yes. The scalar adiabatic C_l are
+ * A_s [cl_resp(b=0) + sum_i delta_i cl_resp(b=i)].
+ *
+ * @param phr       Input: pointer to harmonic structure
+ * @param l         Input: multipole number
+ * @param cl_resp   Output: array with argument cl_resp[index_b*phr->ct_size+index_ct],
+ *                  index_b = 0..num_bins (must be already allocated, resp_size*ct_size)
+ * @return the error status
+ */
+
+int harmonic_cl_resp_at_l(
+                          struct harmonic * phr,
+                          double l,
+                          double * cl_resp
+                          ) {
+
+  int last_index;
+  int index_b;
+  int index_ct;
+  int index_md;
+
+  class_test(phr->has_binned_responses == _FALSE_,
+             phr->error_message,
+             "response spectra were not computed (set binned_Pk_responses = yes)");
+
+  index_md = phr->resp_index_md;
+
+  if ((int)l <= phr->l[phr->l_size[index_md]-1]) {
+
+    class_call(array_interpolate_spline(phr->l,
+                                        phr->l_size[index_md],
+                                        phr->cl_resp,
+                                        phr->ddcl_resp,
+                                        phr->resp_size*phr->ct_size,
+                                        l,
+                                        &last_index,
+                                        cl_resp,
+                                        phr->resp_size*phr->ct_size,
+                                        phr->error_message),
+               phr->error_message,
+               phr->error_message);
+
+    /* set to zero for the types such that l > l_max */
+    for (index_b=0; index_b<phr->resp_size; index_b++)
+      for (index_ct=0; index_ct<phr->ct_size; index_ct++)
+        if ((int)l > phr->l_max_ct[index_md][index_ct])
+          cl_resp[index_b*phr->ct_size+index_ct] = 0.;
+  }
+  else {
+    for (index_b=0; index_b<phr->resp_size*phr->ct_size; index_b++)
+      cl_resp[index_b] = 0.;
+  }
+
+  return _SUCCESS_;
 }
 
 /**
@@ -867,7 +1043,8 @@ int harmonic_compute_cl(
                         double * cl_integrand_limber,
                         double * primordial_pk,
                         double * transfer_ic1,
-                        double * transfer_ic2
+                        double * transfer_ic2,
+                        int index_basis
                         ) {
 
   int index_q;
@@ -893,10 +1070,20 @@ int harmonic_compute_cl(
   double q_min;
   double k_min;
   double l;
+  double * cl_out; /* where the C_l of all types are stored, cl_out[index_ct] */
 
   l = phr->l[index_l];
 
   index_ic1_ic2 = index_symmetric_matrix(index_ic1,index_ic2,phr->ic_size[index_md]);
+
+  /* index_basis < 0: usual C_l with the primordial spectrum. index_basis >= 0: response
+     C_l with P(k) replaced by basis function index_basis of the binned spectrum. */
+  if (index_basis < 0) {
+    cl_out = phr->cl[index_md] + (index_l * phr->ic_ic_size[index_md] + index_ic1_ic2) * phr->ct_size;
+  }
+  else {
+    cl_out = phr->cl_resp + (index_l * phr->resp_size + index_basis) * phr->ct_size;
+  }
 
   if (ppt->has_cl_number_count == _TRUE_ && _scalars_) {
     class_alloc(transfer_ic1_nc,phr->d_size*sizeof(double),phr->error_message);
@@ -928,8 +1115,8 @@ int harmonic_compute_cl(
 
     cl_integrand[index_q*cl_integrand_num_columns+0] = k;
 
-    class_call(primordial_spectrum_at_k(ppm,index_md,linear,k,primordial_pk),
-               ppm->error_message,
+    class_call(harmonic_primordial_at_k(ppm,phr,index_md,k,index_basis,primordial_pk),
+               phr->error_message,
                phr->error_message);
 
     /* above routine checks that k>0: no possible division by zero below */
@@ -1204,8 +1391,8 @@ int harmonic_compute_cl(
 
       cl_integrand_limber[index_q*cl_integrand_num_columns+0] = k;
 
-      class_call(primordial_spectrum_at_k(ppm,index_md,linear,k,primordial_pk),
-                 ppm->error_message,
+      class_call(harmonic_primordial_at_k(ppm,phr,index_md,k,index_basis,primordial_pk),
+                 phr->error_message,
                  phr->error_message);
 
       /* This is where we define for which types of Cl's we want a
@@ -1260,8 +1447,7 @@ int harmonic_compute_cl(
         (_tensors_ && (phr->has_dl == _TRUE_) && (index_ct == phr->index_ct_dl))
         ) {
 
-      phr->cl[index_md]
-        [(index_l * phr->ic_ic_size[index_md] + index_ic1_ic2) * phr->ct_size + index_ct] = 0.;
+      cl_out[index_ct] = 0.;
 
     }
     /* for non-zero spectra, integrate over q */
@@ -1331,9 +1517,7 @@ int harmonic_compute_cl(
 
       /* we have the correct C_l now. We can store it in the transfer structure. */
 
-      phr->cl[index_md]
-        [(index_l * phr->ic_ic_size[index_md] + index_ic1_ic2) * phr->ct_size + index_ct]
-        = clvalue;
+      cl_out[index_ct] = clvalue;
 
     }
   }

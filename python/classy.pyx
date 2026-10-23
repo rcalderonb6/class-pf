@@ -852,6 +852,75 @@ cdef class Class:
 
         return cl
 
+    def binned_cl_responses(self, lmax=-1):
+        """
+        Response spectra of a binned primordial spectrum
+
+        For Pk_ini_type = binned_Pk with binned_Pk_responses = yes, return the unlensed scalar
+        adiabatic C_l computed with the primordial spectrum replaced by each basis function
+        b_0(k) = (k/k_pivot)^(n_s-1) and b_i(k) = b_0(k) h_i(ln k), i = 1..num_bins, where h_i
+        are the linear-interpolation weights of the bins. They are dimensionless, without the
+        factor A_s, so that the scalar adiabatic unlensed spectra are
+
+            C_l = A_s * (R[0] + sum_i delta_i * R[i]).
+
+        Parameters
+        ----------
+        lmax : int, optional
+            Maximum multipole (inclusive); defaults to the maximum set through input parameters.
+
+        Returns
+        -------
+        resp : dict
+            Arrays of shape (num_bins+1, lmax+1) for 'tt', 'ee', 'te', 'pp', 'tp' (those requested
+            in 'output'), and 'ell'.
+        """
+        self.compute(["harmonic"])
+        cdef int lmaxR
+        cdef int index_b
+        cdef int nresp
+
+        if not self.hr.has_binned_responses:
+            raise CosmoSevereError("Response spectra not computed: set Pk_ini_type = binned_Pk and binned_Pk_responses = yes")
+
+        has_flags = [
+            (self.hr.has_tt, self.hr.index_ct_tt, 'tt'),
+            (self.hr.has_ee, self.hr.index_ct_ee, 'ee'),
+            (self.hr.has_te, self.hr.index_ct_te, 'te'),
+            (self.hr.has_pp, self.hr.index_ct_pp, 'pp'),
+            (self.hr.has_tp, self.hr.index_ct_tp, 'tp'),]
+        spectra = [(index, name) for flag, index, name in has_flags if flag]
+        if not spectra:
+            raise CosmoSevereError("No Cl computed")
+
+        lmaxR = self.hr.l_max_tot
+        if lmax == -1:
+            lmax = lmaxR
+        if lmax > lmaxR:
+            raise CosmoSevereError("Can only compute up to lmax=%d"%lmaxR)
+
+        nresp = self.hr.resp_size
+        cdef double *rcl = <double*> calloc(nresp*self.hr.ct_size, sizeof(double))
+
+        resp = {name: np.zeros((nresp, lmax+1), dtype=np.double) for index, name in spectra}
+
+        success = True
+        for ell from 2<=ell<lmax+1:
+            if harmonic_cl_resp_at_l(&self.hr, ell, rcl) == _FAILURE_:
+                success = False
+                break
+            for index_b in range(nresp):
+                for index, name in spectra:
+                    resp[name][index_b, ell] = rcl[index_b*self.hr.ct_size+index]
+        resp['ell'] = np.arange(lmax+1)
+
+        free(rcl)
+
+        if not success:
+            raise CosmoSevereError(self.hr.error_message)
+
+        return resp
+
     def lensed_cl(self, lmax=-1,nofail=False):
         """
         Lensed CMB spectra

@@ -4445,6 +4445,21 @@ int input_read_parameters_primordial(struct file_content * pfc,
         ppm->bin_ddelta = NULL;
       }
       
+      /* Direct evaluation of the binned formula at every k (no ln P table spline) */
+      class_read_flag("binned_Pk_direct",ppm->binned_Pk_direct);
+
+      /* Per-bin response spectra in the harmonic module */
+      class_read_flag("binned_Pk_responses",ppm->binned_Pk_responses);
+      if (ppm->binned_Pk_responses == _TRUE_) {
+        class_test(ppm->binned_interp_mode == _SPLINE_NATURAL_,
+                   errmsg,
+                   "binned_Pk_responses requires binned_interp = linear");
+        class_test((ppt->has_ad == _FALSE_) || (ppt->has_bi == _TRUE_) || (ppt->has_cdi == _TRUE_) ||
+                   (ppt->has_nid == _TRUE_) || (ppt->has_niv == _TRUE_),
+                   errmsg,
+                   "binned_Pk_responses requires purely adiabatic initial conditions");
+      }
+
       if (ppm->primordial_verbose > 0) {
         printf("Binned primordial spectrum with %d bins from k = %e to %e Mpc^-1\n", 
                ppm->num_bins, ppm->k_min_bin, ppm->k_max_bin);
@@ -6272,6 +6287,8 @@ int input_default_params(struct background *pba,
   ppm->num_bins = 10;
   ppm->bin_centers = NULL;
   ppm->bin_amplitudes = NULL;
+  ppm->binned_Pk_direct = _FALSE_;
+  ppm->binned_Pk_responses = _FALSE_;
   
   /** 1.g) For type 'external_Pk' */
   /** 1.g.1) Command generating the table */
