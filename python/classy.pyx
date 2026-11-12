@@ -873,7 +873,9 @@ cdef class Class:
         -------
         resp : dict
             Arrays of shape (num_bins+1, lmax+1) for 'tt', 'ee', 'te', 'pp', 'tp' (those requested
-            in 'output'), and 'ell'.
+            in 'output'), and 'ell'. Also 'ell_sparse' (int array): the multipoles at which harmonic
+            evaluated the responses before splining them in ell (set by l_logstep, l_linstep and
+            l_max_scalars).
         """
         self.compute(["harmonic"])
         cdef int lmaxR
@@ -913,6 +915,7 @@ cdef class Class:
                 for index, name in spectra:
                     resp[name][index_b, ell] = rcl[index_b*self.hr.ct_size+index]
         resp['ell'] = np.arange(lmax+1)
+        resp['ell_sparse'] = np.array([int(self.hr.l[i]) for i in range(self.hr.l_size[self.hr.resp_index_md])], dtype=int)
 
         free(rcl)
 

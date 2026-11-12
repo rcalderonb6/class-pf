@@ -842,12 +842,24 @@ int transfer_get_l_list(
   int index_md;
   int index_tt;
   int increment,current_l;
+  double rescale;
   /** Summary: */
+
+  /* In flat models angular_rescaling = ra_rec/(tau0-tau_rec) is 1 only
+     up to rounding. The int casts below would then give steps of e.g.
+     19 or 20 (or 0 with l_linstep=1, an infinite loop) depending on the
+     sign of the rounding error, i.e. a cosmology-dependent l grid. Snap
+     it to exactly 1 here; other uses of angular_rescaling are continuous
+     in it and are left unchanged. */
+  rescale = ptr->angular_rescaling;
+  if (fabs(rescale-1.) < 1.e-10)
+    rescale = 1.;
+
   /*
     fprintf(stderr,"rescaling %e logstep %e linstep %e\n",
-    ptr->angular_rescaling,
-    pow(ppr->l_logstep,ptr->angular_rescaling),
-    ppr->l_linstep*ptr->angular_rescaling);
+    rescale,
+    pow(ppr->l_logstep,rescale),
+    ppr->l_linstep*rescale);
   */
 
   /* check that largests need value of l_max */
@@ -877,21 +889,21 @@ int transfer_get_l_list(
 
   index_l = 0;
   current_l = 2;
-  increment = MAX((int)(current_l * (pow(ppr->l_logstep,ptr->angular_rescaling)-1.)),1);
+  increment = MAX((int)(current_l * (pow(ppr->l_logstep,rescale)-1.)),1);
 
   while (((current_l+increment) < l_max) &&
-         (increment < ppr->l_linstep*ptr->angular_rescaling)) {
+         (increment < ppr->l_linstep*rescale)) {
 
     index_l ++;
     current_l += increment;
-    increment = MAX((int)(current_l * (pow(ppr->l_logstep,ptr->angular_rescaling)-1.)),1);
+    increment = MAX((int)(current_l * (pow(ppr->l_logstep,rescale)-1.)),1);
 
   }
 
   /** - when the logarithmic step becomes larger than some linear step,
       stick to this linear step till l_max */
 
-  increment = ppr->l_linstep*ptr->angular_rescaling;
+  increment = MAX((int)(ppr->l_linstep*rescale),1);
 
   while ((current_l+increment) <= l_max) {
 
@@ -918,18 +930,18 @@ int transfer_get_l_list(
 
   index_l = 0;
   ptr->l[0] = 2;
-  increment = MAX((int)(ptr->l[0] * (pow(ppr->l_logstep,ptr->angular_rescaling)-1.)),1);
+  increment = MAX((int)(ptr->l[0] * (pow(ppr->l_logstep,rescale)-1.)),1);
 
   while (((ptr->l[index_l]+increment) < l_max) &&
-         (increment < ppr->l_linstep*ptr->angular_rescaling)) {
+         (increment < ppr->l_linstep*rescale)) {
 
     index_l ++;
     ptr->l[index_l]=ptr->l[index_l-1]+increment;
-    increment = MAX((int)(ptr->l[index_l] * (pow(ppr->l_logstep,ptr->angular_rescaling)-1.)),1);
+    increment = MAX((int)(ptr->l[index_l] * (pow(ppr->l_logstep,rescale)-1.)),1);
 
   }
 
-  increment = ppr->l_linstep*ptr->angular_rescaling;
+  increment = MAX((int)(ppr->l_linstep*rescale),1);
 
   while ((ptr->l[index_l]+increment) <= l_max) {
 

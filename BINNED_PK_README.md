@@ -245,6 +245,45 @@ Within the binning range:
 Outside the binning range [k_min_bin, k_max_bin]:
 - δ(k) = 0, so P(k) = P_powerlaw(k)
 
+### ℓ sampling for narrow bases
+
+With `binned_Pk_responses = yes`, `Class.binned_cl_responses()` returns the responses at every
+integer ℓ, splined from the sparse ℓ grid on which harmonic evaluates them (set by `l_logstep`,
+`l_linstep` and `l_max_scalars`). That grid is returned as `resp['ell_sparse']`.
+
+**Deterministic grid.** `transfer_get_l_list` scales the ℓ steps by `angular_rescaling`
+= `ra_rec/(conformal_age - tau_rec)`, which in flat models equals 1 only up to rounding. It is
+now snapped to exactly 1 when `|angular_rescaling - 1| < 1e-10`, so every flat cosmology gets
+the same grid, with linear step exactly `l_linstep`. Before this fix, cosmologies with
+angular_rescaling just below 1 got step `l_linstep - 1`, and `l_linstep = 1` looped forever.
+Curved models are unchanged. Flat cosmologies whose ratio was just below 1 (most of them at
+default settings) now get the nominal grid, which shifts their C_ℓ by up to ~1e-3 relative at
+default precision. Spectra computed before the fix are therefore not bit-comparable.
+
+**Narrow bins oscillate in ℓ.** A narrow bin's response varies on scales of a few multipoles
+(like j_ℓ²(k_i D)), so the spline in ℓ between knots dominates the error. Measured on assembled
+spectra (δ ~ U(±0.5), p99 in units of cosmic variance, N log bins):
+
+| `l_linstep` | ℓ < 2500, N = 20 / 40 / 100 |
+|---|---|
+| 20 | 0.12 / 0.20 / 0.66 (up to 0.9 above) |
+| 10 | 0.05 / 0.10 / 0.25 |
+| 2 | 0.012 at N = 100 (converged) |
+
+The error grows with N at a fixed step, so for N ≫ 100 only every-ℓ evaluation is safe.
+
+**Recommended settings for narrow bases (40 or more bins):**
+
+```
+q_linstep = 0.1          # high-k transfer sampling (ℓ ≥ 30)
+q_logstep_spline = 50    # low-k sampling (ℓ < 30); larger values are coarser
+l_linstep = 1            # every integer ℓ
+```
+
+Cost at `l_max_scalars = 8000`, 4 threads: roughly 15–25 min (N = 40–100) and 16 GB per run, against
+45 s and 1.2 GB at default precision. The power-law row R⁰ is smooth in ℓ and fine on the
+default grid.
+
 ### Memory Management
 
 The module properly allocates and deallocates:

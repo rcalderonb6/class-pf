@@ -357,6 +357,8 @@ cdef extern from "class.h":
         int index_md_scalars
         short has_binned_responses
         int resp_size
+        int resp_index_md
+        double * l
 
     cdef struct output:
         ErrorMsg error_message
