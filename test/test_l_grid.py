@@ -12,7 +12,10 @@ Checks:
 1. nearby flat cosmologies, on both sides of angular_rescaling = 1, get the same l list, with
    linear step exactly l_linstep;
 2. l_linstep = 1 terminates and gives every integer l for a flat cosmology with
-   angular_rescaling slightly below 1 (run in a subprocess with a timeout, since it used to hang).
+   angular_rescaling slightly below 1 (run in a subprocess with a timeout, since it used to hang);
+3. fine l window (l_max_fine, l_linstep_fine): the response grid is the sorted union of the
+   ordinary grid and the window, the C_l grid ('ell_sparse') is unchanged, and the raw and lensed
+   C_l are bit-identical with the window on and off; also with r < 1 and l_linstep_fine = 1.
 """
 
 import os
@@ -100,7 +103,40 @@ def test_linstep_one_terminates():
     print(f"[2] l_linstep = 1 terminates with every integer l up to {lmax}: {out.stdout.strip()}")
 
 
+def test_fine_window():
+    lmax, l_fine = 2000, 700
+    params = BASE | {"h": 0.6736, "omega_cdm": 0.12, "l_linstep": 20, "l_max_scalars": lmax,
+                     "output": "tCl,pCl,lCl", "lensing": "yes"}
+    out = {}
+    for label, extra in (("off", {}), ("on", {"l_max_fine": l_fine, "l_linstep_fine": 1}),
+                         ("on3", {"l_max_fine": l_fine, "l_linstep_fine": 3})):
+        c = Class()
+        c.set(params | extra)
+        c.compute()
+        d = c.get_current_derived_parameters(["ra_rec", "conformal_age", "tau_rec"])
+        r = d["ra_rec"] / (d["conformal_age"] - d["tau_rec"])
+        out[label] = (c.binned_cl_responses(), c.raw_cl(lmax), c.lensed_cl(lmax - 500))
+        c.struct_cleanup()
+    assert r < 1, f"r - 1 = {r - 1:+.1e}: pick a cosmology with r < 1"
+    coarse = out["off"][0]["ell_sparse"]
+    np.testing.assert_array_equal(out["off"][0]["ell_resp"], coarse)
+    for label, step in (("on", 1), ("on3", 3)):
+        resp, raw, lensed = out[label]
+        np.testing.assert_array_equal(resp["ell_sparse"], coarse)
+        expected = np.union1d(coarse, np.arange(2, l_fine + 1, step))
+        np.testing.assert_array_equal(resp["ell_resp"], expected)
+        for s in ("tt", "te", "ee", "pp"):
+            np.testing.assert_array_equal(raw[s], out["off"][1][s])
+            np.testing.assert_array_equal(resp[s][0], out["off"][0][s][0])
+        for s in ("tt", "te", "ee"):
+            np.testing.assert_array_equal(lensed[s], out["off"][2][s])
+    print(f"[3] fine window to l = {l_fine} (r - 1 = {r - 1:+.1e}): response grid = union of the "
+          f"{len(coarse)} ordinary and the window multipoles ({len(out['on'][0]['ell_resp'])} for step 1); "
+          f"raw, lensed C_l and R_0 bit-identical")
+
+
 if __name__ == "__main__":
     test_grid_is_deterministic()
     test_linstep_one_terminates()
+    test_fine_window()
     print("all passed")

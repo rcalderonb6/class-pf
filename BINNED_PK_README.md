@@ -135,6 +135,13 @@ cosmo.struct_cleanup()
 |-----------|------|---------|-------------|
 | `delta_1`, `delta_2`, ... | double | 0.0 | Amplitude deviation for each bin (if not specified, defaults to 0) |
 | `k_pivot` | double | 0.05 | Pivot scale for power-law spectrum (Mpc⁻¹) |
+| `binned_interp` | string | `linear` | `linear` (in ln k) or `spline` (natural cubic spline of δ) |
+| `binned_Pk_direct` | yes/no | no | Evaluate the binned formula at every k instead of splining ln P from the primordial table (exact linear interpolation in ln k) |
+| `binned_Pk_responses` | yes/no | no | Also compute the response C_ℓ to the power law and to each bin (requires `binned_interp = linear` and adiabatic initial conditions) |
+| `harmonic_kernel_export` | yes/no | no | Allow `Class.harmonic_kernels()` (any `Pk_ini_type`; flat models; scalars with tCl, pCl or lCl) |
+| `l_max_fine` | int (precision) | 0 | Fine ℓ window: add every `l_linstep_fine`-th multipole from 2 to `l_max_fine` to the transfer grid (flat models) |
+| `l_linstep_fine` | int (precision) | 1 | Step of the fine ℓ window |
+| `q_max_fine` | double (precision) | 0 | If > 0, the transfer functions at the multipoles added by the window are computed only for q ≤ `q_max_fine` (Mpc⁻¹); must be ≥ `k_max_bin` with responses |
 
 ### Constraints
 
@@ -277,12 +284,96 @@ The error grows with N at a fixed step, so for N ≫ 100 only every-ℓ evaluati
 ```
 q_linstep = 0.1          # high-k transfer sampling (ℓ ≥ 30)
 q_logstep_spline = 50    # low-k sampling (ℓ < 30); larger values are coarser
-l_linstep = 1            # every integer ℓ
+l_max_fine = 6000        # every integer ℓ where the bins live (see "Fine ℓ window" below) ...
+q_max_fine = 0.34        # ... and only for q <= k_max_bin
 ```
 
-Cost at `l_max_scalars = 8000`, 4 threads: roughly 15–25 min (N = 40–100) and 16 GB per run, against
-45 s and 1.2 GB at default precision. The power-law row R⁰ is smooth in ℓ and fine on the
-default grid.
+`l_linstep = 1` (every integer ℓ to `l_max_scalars`) gives the same bin responses up to
+`l_max_fine`. The power-law row R⁰ is smooth in ℓ and fine on the default grid.
+
+Cost at `l_max_scalars = 8000`, ACT precision, 4 threads (test/bench_harmonic_kernels.py):
+
+| configuration | multipoles (C_ℓ / bins) | compute | peak RSS |
+|---|---|---|---|
+| ordinary grid (`l_linstep` 20) | 543 / 543 | 39 s | 1.4 GB |
+| window to 6000, all q | 543 / 6100 | 336 s | 12.9 GB |
+| window to 6000, `q_max_fine` 0.34 (+ export) | 543 / 6100 | 243 s | 12.9 GB |
+| every ℓ (`l_linstep` 1) | 7999 / 7999 | 462 s | 16.8 GB |
+
+The window saves about a factor of 2 in time against an every-ℓ run, but only 25% in memory. The
+q cut saves less than one might expect because with `q_logstep_spline = 50` most of the q grid
+(7986 points) already lies below 0.34. Exporting the kernels (6100 ℓ × 7986 q × 3 arrays, read in
+chunks of 500 ℓ) takes 0.3 s and 1.2 GB in total.
+
+### Direct mode, responses and edge behaviour
+
+**Basis.** With `binned_interp = linear`, the spectrum is linear in the bin amplitudes:
+
+```
+P(k) = A_s [ b_0(k) + Σ_i δ_i b_i(k) ],   b_0(k) = (k/k_pivot)^(n_s-1),   b_i(k) = b_0(k) h_i(ln k)
+```
+
+where the h_i are hats, linear in ln k between neighbouring bin centres, with two edge rules:
+- between `k_min_bin` and the first centre, h_1 = 1 (plateau), and likewise h_N = 1 between the last
+  centre and `k_max_bin`;
+- outside [`k_min_bin`, `k_max_bin`] all h_i = 0, so P = A_s b_0 (a jump at the range edges if
+  δ_1 or δ_N ≠ 0).
+
+The basis is `primordial_binned_basis_at_k()` (source/primordial.c), available in Python as
+`Class.binned_basis(k, index_b)`.
+
+**Direct mode** (`binned_Pk_direct = yes`). By default CLASS tabulates ln P(k) and splines it,
+which smooths the kinks of the hats (about 2e-4 relative on the C_ℓ at 200 points per decade).
+In direct mode, `primordial_spectrum_at_k` evaluates the formula above at every k, so the
+C_ℓ are exactly linear in the δ_i.
+
+**Responses** (`binned_Pk_responses = yes`). Harmonic repeats its k integral with P replaced by
+each b_i, giving R^i_ℓ (unlensed TT, TE, EE, PP, without A_s). `Class.binned_cl_responses()`
+returns them at every integer ℓ, so that `C_ℓ = A_s (R⁰ + Σ δ_i R^i)` reproduces the direct-mode
+unlensed C_ℓ to ~1e-14. R⁰ (and the C_ℓ) are splined in ℓ over `ell_sparse`; the bins R^1..R^N
+over `ell_resp`, which adds the fine ℓ window (below), if any.
+
+### Fine ℓ window and kernel export
+
+Narrow bins need every integer ℓ, but only where the bins live: ℓ ≲ 1.2 k_max_bin D
+(D = `conformal_age` − `tau_rec` ≈ 14 000 Mpc, so ℓ ≈ 6000 for k_max_bin = 0.34), and q ≤ k_max_bin.
+The power law R⁰ is smooth and fine on the ordinary grid.
+
+```
+l_max_fine = 6000     # every integer ℓ (step l_linstep_fine = 1) up to 6000 ...
+q_max_fine = 0.34     # ... computed only for q <= k_max_bin; zero above
+```
+
+The window is merged into the ordinary grid, which is kept as it is. The C_ℓ, lensing and R⁰
+use only the ordinary multipoles and are bit-identical with the window on and off. The bin
+responses at the window multipoles equal those of an every-ℓ run (`l_linstep = 1`) exactly,
+because the hats vanish above `k_max_bin` (hence the requirement `q_max_fine ≥ k_max_bin`).
+The window only reduces the transfer time. The transfer table is still dense in (ℓ, q), so
+memory scales with the total number of multipoles, as for an every-ℓ run.
+
+**Kernel export** (`harmonic_kernel_export = yes`, flat models). `Class.harmonic_kernels(l_min,
+l_max, q_max)` returns the transfer functions that harmonic integrates, so that any basis can be
+projected outside CLASS from one run:
+
+```
+C^{XY}_ℓ = ∫ dq (4π/q) P(q) Δ^X_ℓ(q) Δ^Y_ℓ(q),   XY ∈ {TT, EE, TE, φφ},  q = k [Mpc⁻¹]
+```
+
+where P is the dimensionless primordial spectrum (with A_s) and Δ_T = T0 + T1 + T2 as combined by
+harmonic. The keys are:
+- `ell` and `ell_is_coarse` (the ordinary grid plus the window);
+- `q`, with `Delta_T`, `Delta_E`, `Delta_phi` of shape (n_ℓ, n_q);
+- `q_limber` and `Delta_phi_limber`: harmonic uses these for φφ at ℓ > `ell_limber_switch`
+  (= `l_switch_limber`);
+- `q_max_fine`.
+
+Harmonic's quadrature is a cubic spline of the integrand in q, with edge derivatives estimated,
+integrated over the whole grid. `classy._classy._class_spline_integral(q, integrand)` reproduces
+it, and with it the projection matches `binned_cl_responses()` and `raw_cl()` to ~1e-15
+(test/test_harmonic_kernels.py). The arrays are those the transfer module keeps anyway until
+`struct_cleanup()`, so the flag costs no memory or time. A call copies only the requested range
+of ℓ and the q ≤ `q_max` (default `q_max_fine` if set), so large exports can be read in chunks.
+Window multipoles are zero above `q_max_fine`.
 
 ### Memory Management
 

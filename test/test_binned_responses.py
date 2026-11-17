@@ -10,7 +10,9 @@ Checks:
 3. the same with the default ln P table spline (k_per_decade_primordial = 200), informational;
 4. lensed spectra are unchanged by the flag;
 5. run time with and without responses;
-6. error paths.
+6. error paths;
+7. fine l window: the bin responses at the window multipoles, with the q cut q_max_fine =
+   k_max_bin, equal those of an every-l run (l_linstep = 1) without the cut; R_0 is unchanged.
 """
 
 import os
@@ -145,10 +147,37 @@ def test_error_paths():
     c.struct_cleanup()
 
 
+def test_fine_window():
+    lmax, l_fine = 1200, 900
+    base = BASE | {"l_max_scalars": lmax, "binned_Pk_responses": "yes", "l_linstep": 20}
+    out = {}
+    for label, extra in (("coarse", {}),
+                         ("window", {"l_max_fine": l_fine, "q_max_fine": BASE["k_max_bin"]}),
+                         ("every_l", {"l_linstep": 1})):
+        c = Class()
+        c.set(base | extra)
+        t0 = time.perf_counter()
+        c.compute()
+        out[label] = (c.binned_cl_responses(lmax), time.perf_counter() - t0)
+        c.struct_cleanup()
+    win, ref, coarse = out["window"][0], out["every_l"][0], out["coarse"][0]
+    fine = win["ell_resp"][win["ell_resp"] <= l_fine]
+    worst = 0.
+    for s in SPECTRA:
+        a, b = win[s][1:, fine], ref[s][1:, fine]
+        worst = max(worst, np.max(np.abs(a - b)) / np.max(np.abs(b)))
+        np.testing.assert_array_equal(win[s][0], coarse[s][0])
+    assert worst < 1e-8, worst
+    print(f"[7] fine window to l = {l_fine} with q_max_fine = k_max_bin: bins vs every-l run "
+          f"{worst:.1e}; R_0 unchanged; time {out['coarse'][1]:.2f} / {out['window'][1]:.2f} / "
+          f"{out['every_l'][1]:.2f} s (coarse / window / every l)")
+
+
 if __name__ == "__main__":
     test_responses_match_separate_runs()
     test_assembly_direct()
     test_assembly_table_spline()
     test_lensing_unchanged_and_timing()
     test_error_paths()
+    test_fine_window()
     print("all checks passed")
