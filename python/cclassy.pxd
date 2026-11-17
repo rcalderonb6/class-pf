@@ -52,6 +52,10 @@ cdef extern from "class.h":
 
     cdef struct precision:
         double nonlinear_min_k_max
+        double l_switch_limber
+        int l_max_fine
+        int l_linstep_fine
+        double q_max_fine
         char base_path[1000]
         ErrorMsg error_message
 
@@ -150,6 +154,10 @@ cdef extern from "class.h":
         short is_allocated
         ErrorMsg error_message
         short has_scalars
+        short has_ad
+        short has_cl_cmb_temperature
+        short has_cl_cmb_polarization
+        short has_cl_cmb_lensing_potential
         short has_vectors
         short has_tensors
 
@@ -286,10 +294,35 @@ cdef extern from "class.h":
     cdef struct transfer:
         short is_allocated
         ErrorMsg error_message
+        int md_size
+        int index_tt_t0
+        int index_tt_t1
+        int index_tt_t2
+        int index_tt_e
+        int index_tt_lcmb
+        int * tt_size
+        int ** l_size_tt
+        int * l_size
+        int l_size_max
+        int * l
+        short * l_is_coarse
+        size_t q_size
+        double * q
+        short do_lcmb_full_limber
+        size_t q_size_limber
+        double * q_limber
+        double ** transfer
+        double ** transfer_limber
+        short has_kernel_export
 
     cdef struct primordial:
         short is_allocated
         ErrorMsg error_message
+        int num_bins
+        double k_min_bin
+        double k_max_bin
+        int binned_index_md
+        int binned_index_ic1_ic2
         double k_pivot
         double A_s
         double n_s
@@ -359,6 +392,8 @@ cdef extern from "class.h":
         int resp_size
         int resp_index_md
         double * l
+        int l_resp_size
+        double * l_resp
 
     cdef struct output:
         ErrorMsg error_message
@@ -458,6 +493,7 @@ cdef extern from "class.h":
     cdef int _FAILURE_
     cdef int _FALSE_
     cdef int _TRUE_
+    cdef int _SPLINE_EST_DERIV_
 
     cdef double _Mpc_over_m_
     cdef double _c_
@@ -498,6 +534,9 @@ cdef extern from "class.h":
 
     int harmonic_cl_at_l(void* phr,double l,double * cl,double * * cl_md,double * * cl_md_ic)
     int harmonic_cl_resp_at_l(void* phr,double l,double * cl_resp)
+    int primordial_binned_basis_at_k(void* ppm,int index_md,int index_ic1_ic2,double k,int index_basis,double * pk)
+    int array_spline(double * array,int n_columns,int n_lines,int index_x,int index_y,int index_ddydx2,short spline_mode,ErrorMsg errmsg)
+    int array_integrate_all_trapzd_or_spline(double * array,int n_columns,int n_lines,int index_start_spline,int index_x,int index_y,int index_ddy,double * result,ErrorMsg errmsg)
     int lensing_cl_at_l(void * ple,int l,double * cl_lensed)
 
     int harmonic_pk_at_z(

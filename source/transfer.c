@@ -208,6 +208,13 @@ int transfer_init(
 
   q_period = 2.*_PI_/(tau0-tau_rec)*ptr->angular_rescaling;
 
+  /** - the kernel export assumes k = q and the formula
+      C_l = int dq 4pi/q P(q) Delta_l(q)^2, valid for flat models only */
+
+  class_test((ptr->has_kernel_export == _TRUE_) && (pba->sgnK != 0),
+             ptr->error_message,
+             "harmonic_kernel_export is only implemented for flat models (Omega_k = 0)");
+
   /** - initialize all indices in the transfer structure and
       allocate all its arrays using transfer_indices() */
 
@@ -437,6 +444,7 @@ int transfer_free(
     free(ptr->l_size_tt);
     free(ptr->l_size);
     free(ptr->l);
+    free(ptr->l_is_coarse);
     free(ptr->q);
     free(ptr->k);
     free(ptr->transfer);
@@ -626,7 +634,7 @@ int transfer_indices(
   */
 
   /** - get l values using transfer_get_l_list() */
-  class_call(transfer_get_l_list(ppr,ppt,ptr),
+  class_call(transfer_get_l_list(ppr,ppt,ptr,sgnK),
              ptr->error_message,
              ptr->error_message);
 
@@ -828,21 +836,26 @@ int transfer_perturbation_sources_spline_free(
  * @param ppr  Input: pointer to precision structure
  * @param ppt  Input: pointer to perturbation structure
  * @param ptr  Input/Output: pointer to transfer structure containing l's
+ * @param sgnK Input: spatial curvature sign (the fine l window needs a flat model)
  * @return the error status
  */
 
 int transfer_get_l_list(
                         struct precision * ppr,
                         struct perturbations * ppt,
-                        struct transfer * ptr
+                        struct transfer * ptr,
+                        int sgnK
                         ) {
 
   int index_l;
   int l_max=0;
   int index_md;
   int index_tt;
-  int increment,current_l;
   double rescale;
+  int * l_coarse;
+  int l_size_coarse,l_size_fine;
+  int index_coarse,index_fine,l_c,l_f;
+  int index_extra;
   /** Summary: */
 
   /* In flat models angular_rescaling = ra_rec/(tau0-tau_rec) is 1 only
@@ -883,79 +896,68 @@ int transfer_get_l_list(
 
   }
 
-  /** - allocate and fill l array */
+  /** - coarse grid: count with transfer_coarse_l_list(), then fill
+      with the same routine, so both passes share one definition */
 
-  /** - start from l = 2 and increase with logarithmic step */
+  transfer_coarse_l_list(ppr,rescale,l_max,NULL,&l_size_coarse);
+  class_alloc(l_coarse,l_size_coarse*sizeof(int),ptr->error_message);
+  transfer_coarse_l_list(ppr,rescale,l_max,l_coarse,&l_size_coarse);
+
+  /** - optional fine window: every l_linstep_fine-th multipole from 2
+      to l_max_fine, merged with the coarse grid (sorted, no
+      duplicates). The coarse values are flagged in l_is_coarse, so that
+      harmonic can keep its ordinary C_l on exactly the coarse grid. */
+
+  l_size_fine = 0;
+  if (ppr->l_max_fine > 0) {
+
+    class_test(ppr->l_linstep_fine < 1,
+               ptr->error_message,
+               "l_linstep_fine=%d must be >= 1",ppr->l_linstep_fine);
+    class_test(ppr->l_max_fine < 2,
+               ptr->error_message,
+               "l_max_fine=%d must be >= 2 (or 0 to switch the fine window off)",ppr->l_max_fine);
+    class_test(ppr->l_max_fine > l_max,
+               ptr->error_message,
+               "l_max_fine=%d is larger than the largest multipole requested, l_max=%d",ppr->l_max_fine,l_max);
+    class_test(sgnK != 0,
+               ptr->error_message,
+               "the fine l window (l_max_fine>0) is only implemented for flat models");
+
+    l_size_fine = (ppr->l_max_fine-2)/ppr->l_linstep_fine + 1;
+  }
+  else {
+    class_test(ppr->q_max_fine > 0.,
+               ptr->error_message,
+               "q_max_fine is set but the fine l window is off (l_max_fine=0)");
+  }
+
+  class_alloc(ptr->l,(l_size_coarse+l_size_fine)*sizeof(int),ptr->error_message);
+  class_alloc(ptr->l_is_coarse,(l_size_coarse+l_size_fine)*sizeof(short),ptr->error_message);
 
   index_l = 0;
-  current_l = 2;
-  increment = MAX((int)(current_l * (pow(ppr->l_logstep,rescale)-1.)),1);
-
-  while (((current_l+increment) < l_max) &&
-         (increment < ppr->l_linstep*rescale)) {
-
-    index_l ++;
-    current_l += increment;
-    increment = MAX((int)(current_l * (pow(ppr->l_logstep,rescale)-1.)),1);
-
+  index_coarse = 0;
+  index_fine = 0;
+  while ((index_coarse < l_size_coarse) || (index_fine < l_size_fine)) {
+    /* all values are <= l_max, so l_max+1 is a safe sentinel */
+    l_c = (index_coarse < l_size_coarse) ? l_coarse[index_coarse] : l_max+1;
+    l_f = (index_fine < l_size_fine) ? 2+index_fine*ppr->l_linstep_fine : l_max+1;
+    if (l_c <= l_f) {
+      ptr->l[index_l] = l_c;
+      ptr->l_is_coarse[index_l] = _TRUE_;
+      index_coarse++;
+      if (l_f == l_c) index_fine++;
+    }
+    else {
+      ptr->l[index_l] = l_f;
+      ptr->l_is_coarse[index_l] = _FALSE_;
+      index_fine++;
+    }
+    index_l++;
   }
+  ptr->l_size_max = index_l;
 
-  /** - when the logarithmic step becomes larger than some linear step,
-      stick to this linear step till l_max */
-
-  increment = MAX((int)(ppr->l_linstep*rescale),1);
-
-  while ((current_l+increment) <= l_max) {
-
-    index_l ++;
-    current_l += increment;
-
-  }
-
-  /** - last value set to exactly l_max */
-
-  if (current_l != l_max) {
-
-    index_l ++;
-    current_l = l_max;
-
-  }
-
-  ptr->l_size_max = index_l+1;
-
-  /** - so far we just counted the number of values. Now repeat the
-      whole thing but fill array with values. */
-
-  class_alloc(ptr->l,ptr->l_size_max*sizeof(int),ptr->error_message);
-
-  index_l = 0;
-  ptr->l[0] = 2;
-  increment = MAX((int)(ptr->l[0] * (pow(ppr->l_logstep,rescale)-1.)),1);
-
-  while (((ptr->l[index_l]+increment) < l_max) &&
-         (increment < ppr->l_linstep*rescale)) {
-
-    index_l ++;
-    ptr->l[index_l]=ptr->l[index_l-1]+increment;
-    increment = MAX((int)(ptr->l[index_l] * (pow(ppr->l_logstep,rescale)-1.)),1);
-
-  }
-
-  increment = MAX((int)(ppr->l_linstep*rescale),1);
-
-  while ((ptr->l[index_l]+increment) <= l_max) {
-
-    index_l ++;
-    ptr->l[index_l]=ptr->l[index_l-1]+increment;
-
-  }
-
-  if (ptr->l[index_l] != l_max) {
-
-    index_l ++;
-    ptr->l[index_l]= l_max;
-
-  }
+  free(l_coarse);
 
   /* for each mode and type, find relevant size of l array,
      l_size_tt[index_md][index_tt] (since for some modes and types
@@ -1010,14 +1012,20 @@ int transfer_get_l_list(
                  l_max,
                  ptr->l[ptr->l_size_max-1]);
 
+      /* first coarse multipole >= l_max, then two more coarse
+         multipoles if available (for interpolation without boundary
+         effects), keeping the fine-window multipoles in between. The
+         last multipole, the global l_max, is always coarse. Without
+         the fine window this is: first l >= l_max, plus two points. */
       index_l=0;
-      while (ptr->l[index_l] < l_max) index_l++;
+      while ((ptr->l[index_l] < l_max) || (ptr->l_is_coarse[index_l] == _FALSE_)) index_l++;
+      for (index_extra=0; index_extra<2; index_extra++) {
+        if (index_l+1 < ptr->l_size_max) {
+          index_l++;
+          while ((index_l+1 < ptr->l_size_max) && (ptr->l_is_coarse[index_l] == _FALSE_)) index_l++;
+        }
+      }
       ptr->l_size_tt[index_md][index_tt]=index_l+1;
-
-      if (ptr->l_size_tt[index_md][index_tt] < ptr->l_size_max)
-        ptr->l_size_tt[index_md][index_tt]++;
-      if (ptr->l_size_tt[index_md][index_tt] < ptr->l_size_max)
-        ptr->l_size_tt[index_md][index_tt]++;
 
       ptr->l_size[index_md] = MAX(ptr->l_size[index_md],ptr->l_size_tt[index_md][index_tt]);
 
@@ -1026,6 +1034,76 @@ int transfer_get_l_list(
 
   return _SUCCESS_;
 
+}
+
+/**
+ * Coarse multipole grid: logarithmic step l_logstep^rescale from l=2,
+ * then linear step l_linstep*rescale, then l_max exactly. Counts the
+ * values in *l_size, and fills l_list unless it is NULL, so that the
+ * counting and filling passes cannot drift apart.
+ *
+ * @param ppr     Input: pointer to precision structure
+ * @param rescale Input: angular rescaling (snapped to 1 for flat models)
+ * @param l_max   Input: largest multipole
+ * @param l_list  Output: list of multipoles, or NULL to count only
+ * @param l_size  Output: number of multipoles
+ * @return the error status
+ */
+
+int transfer_coarse_l_list(
+                           struct precision * ppr,
+                           double rescale,
+                           int l_max,
+                           int * l_list,
+                           int * l_size
+                           ) {
+
+  int index_l=0;
+  int current_l=2;
+  int increment;
+
+  if (l_list != NULL) l_list[0] = current_l;
+
+  /** - start from l = 2 and increase with logarithmic step */
+
+  increment = MAX((int)(current_l * (pow(ppr->l_logstep,rescale)-1.)),1);
+
+  while (((current_l+increment) < l_max) &&
+         (increment < ppr->l_linstep*rescale)) {
+
+    index_l ++;
+    current_l += increment;
+    if (l_list != NULL) l_list[index_l] = current_l;
+    increment = MAX((int)(current_l * (pow(ppr->l_logstep,rescale)-1.)),1);
+
+  }
+
+  /** - when the logarithmic step becomes larger than some linear step,
+      stick to this linear step till l_max */
+
+  increment = MAX((int)(ppr->l_linstep*rescale),1);
+
+  while ((current_l+increment) <= l_max) {
+
+    index_l ++;
+    current_l += increment;
+    if (l_list != NULL) l_list[index_l] = current_l;
+
+  }
+
+  /** - last value set to exactly l_max */
+
+  if (current_l != l_max) {
+
+    index_l ++;
+    current_l = l_max;
+    if (l_list != NULL) l_list[index_l] = current_l;
+
+  }
+
+  *l_size = index_l+1;
+
+  return _SUCCESS_;
 }
 
 /**
@@ -2058,6 +2136,11 @@ int transfer_compute_for_each_q(
               }
               /* This would maybe go into transfer_can_be_neglected later: */
               if ((ptw->sgnK != 0) && (index_q < ptr->index_q_flat_approximation) && (index_l>=ptw->HIS.l_size) && (use_full_limber == _FALSE_)) {
+                neglect = _TRUE_;
+              }
+              /* fine l window: the multipoles added by the window (not
+                 on the coarse grid) are only needed for q <= q_max_fine */
+              if ((ppr->q_max_fine > 0.) && (ptr->l_is_coarse[index_l] == _FALSE_) && (q > ppr->q_max_fine)) {
                 neglect = _TRUE_;
               }
               if (neglect == _TRUE_) {

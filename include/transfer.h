@@ -159,6 +159,10 @@ struct transfer {
 
   int * l;        /**< list of multipole values l[index_l] */
 
+  short * l_is_coarse; /**< l_is_coarse[index_l]: _TRUE_ if l[index_l] belongs to the ordinary (l_logstep, l_linstep) grid, _FALSE_ if it was only added by the fine window (l_max_fine, l_linstep_fine) */
+
+  short has_kernel_export; /**< harmonic_kernel_export: keep and validate the transfer kernels for export to python (no extra storage) */
+
   //int * l_size_bessel; /**< for each wavenumber, maximum value of l at which bessel functions must be evaluated */
 
   double angular_rescaling; /**< correction between l and k space due to curvature (= comoving angular diameter distance to recombination / comoving radius to recombination) */
@@ -365,8 +369,17 @@ extern "C" {
   int transfer_get_l_list(
                           struct precision * ppr,
                           struct perturbations * ppt,
-                          struct transfer * ptr
+                          struct transfer * ptr,
+                          int sgnK
                           );
+
+  int transfer_coarse_l_list(
+                             struct precision * ppr,
+                             double rescale,
+                             int l_max,
+                             int * l_list,
+                             int * l_size
+                             );
 
   int transfer_get_q_list(
                           struct precision * ppr,

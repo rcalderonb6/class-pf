@@ -5293,6 +5293,26 @@ int input_read_parameters_lensing(struct file_content * pfc,
 
   class_read_flag("want_lcmb_full_limber",ppt->want_lcmb_full_limber);
 
+  /** 4) Export of the harmonic transfer kernels Delta_l(q) to python
+      (Class.harmonic_kernels()). The kernels are the transfer arrays
+      that harmonic integrates, kept anyway until struct_cleanup: the
+      flag only validates the run (flatness is checked in transfer_init). */
+
+  class_read_flag("harmonic_kernel_export",ptr->has_kernel_export);
+  if (ptr->has_kernel_export == _TRUE_) {
+    class_test((ppt->has_scalars == _FALSE_),
+               errmsg,
+               "harmonic_kernel_export requires scalar modes");
+    class_test((ppt->has_cl_cmb_temperature == _FALSE_) &&
+               (ppt->has_cl_cmb_polarization == _FALSE_) &&
+               (ppt->has_cl_cmb_lensing_potential == _FALSE_),
+               errmsg,
+               "harmonic_kernel_export requires at least one of tCl, pCl, lCl in output");
+    class_test(ppt->has_ad == _FALSE_,
+               errmsg,
+               "harmonic_kernel_export requires adiabatic initial conditions");
+  }
+
   return _SUCCESS_;
 
 }
@@ -6354,6 +6374,7 @@ int input_default_params(struct background *pba,
   ptr->lcmb_rescale=1.;
   ptr->lcmb_tilt=0.;
   ptr->lcmb_pivot=0.1;
+  ptr->has_kernel_export = _FALSE_;
   ppt->want_lcmb_full_limber = _TRUE_;
 
   /**

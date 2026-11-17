@@ -117,7 +117,11 @@ struct harmonic {
   short has_binned_responses; /**< were per-bin response C_l of a binned primordial spectrum computed? (binned_Pk_responses) */
   int resp_size;              /**< number of response spectra: num_bins+1 (basis b_0 = power law, then one per bin) */
   int resp_index_md;          /**< mode (scalars) of the response spectra */
-  double * cl_resp;           /**< response spectra of the scalar adiabatic mode, cl_resp[(index_l * phr->resp_size + index_b) * phr->ct_size + index_ct], without the factor A_s */
+  double * cl_resp0;          /**< response to the power law b_0, on the C_l grid l: cl_resp0[index_l * phr->ct_size + index_ct], without the factor A_s */
+  double * ddcl_resp0;        /**< second derivatives of previous table with respect to l */
+  int l_resp_size;            /**< number of multipoles of the bin responses (coarse grid plus fine l window) */
+  double * l_resp;            /**< multipoles of the bin responses, l_resp[index_l] */
+  double * cl_resp;           /**< response spectra to the bins b_1..b_N, on l_resp: cl_resp[(index_l * (phr->resp_size-1) + index_b-1) * phr->ct_size + index_ct], without the factor A_s */
   double * ddcl_resp;         /**< second derivatives of previous table with respect to l */
 
   //@}
@@ -208,6 +212,7 @@ extern "C" {
                           int index_ic1,
                           int index_ic2,
                           int index_l,
+                          int index_l_out,
                           int cl_integrand_num_columns,
                           double * cl_integrand,
                           double * cl_integrand_limber,

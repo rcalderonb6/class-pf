@@ -428,6 +428,12 @@ class_precision_parameter(l_linstep,int,40) /**< factor for logarithmic spacing 
 
 class_precision_parameter(l_logstep,double,1.12) /**< maximum spacing of values of l over which Bessel and transfer functions are sampled (so, spacing becomes linear instead of logarithmic at some point) */
 
+class_precision_parameter(l_max_fine,int,0) /**< fine l window: if > 0, every l_linstep_fine-th multipole from 2 to l_max_fine is added to the (l_logstep, l_linstep) grid; flat models only */
+
+class_precision_parameter(l_linstep_fine,int,1) /**< step of the fine l window */
+
+class_precision_parameter(q_max_fine,double,0.) /**< if > 0, transfer functions at the multipoles added by the fine l window are only computed for q <= q_max_fine (in 1/Mpc) and set to zero above */
+
 class_precision_parameter(hyper_x_min,double,1.0e-5)  /**< flat case: lower bound on the smallest value of x at which we sample \f$ \Phi_l^{\nu}(x)\f$ or \f$ j_l(x)\f$ */
 class_precision_parameter(hyper_sampling_flat,double,8.0)  /**< flat case: number of sampled points x per approximate wavelength \f$ 2\pi \f$, should remain >7.5 */
 class_precision_parameter(hyper_sampling_curved_low_nu,double,7.0)  /**< open/closed cases: number of sampled points x per approximate wavelength \f$ 2\pi/\nu\f$, when \f$ \nu \f$ smaller than hyper_nu_sampling_step */

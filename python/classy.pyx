@@ -54,6 +54,40 @@ __version__ = _VERSION_.decode("utf-8")
 # reading the parameters (in the normal Class, this would just return a line in
 # the unused_parameters file), or a NameError in other cases. This allows
 # MontePython to handle things differently.
+def _class_spline_integral(x, y):
+    """
+    Integral of y over x with harmonic's quadrature: cubic spline of y with first
+    derivatives estimated at both edges (array_spline, _SPLINE_EST_DERIV_), integrated
+    exactly over the whole grid (array_integrate_all_trapzd_or_spline). y may have
+    shape (..., len(x)); the integral is taken over the last axis.
+    """
+    cdef Py_ssize_t n, i, j, nrow
+    cdef double result
+    cdef char errmsg[2048]
+    xx = np.ascontiguousarray(x, dtype=np.double)
+    yy = np.asarray(y, dtype=np.double)
+    n = xx.shape[0]
+    if yy.shape[-1] != n:
+        raise ValueError("y must have len(x) as its last axis")
+    lead = yy.shape[:-1]
+    yy = np.ascontiguousarray(yy.reshape(-1, n))
+    nrow = yy.shape[0]
+    cdef double[:, ::1] table = np.zeros((n, 3), dtype=np.double)
+    cdef double[::1] xv = xx
+    cdef double[:, ::1] yv = yy
+    res = np.empty(nrow, dtype=np.double)
+    cdef double[::1] rv = res
+    for j in range(nrow):
+        for i in range(n):
+            table[i, 0] = xv[i]
+            table[i, 1] = yv[j, i]
+        if array_spline(&table[0, 0], 3, <int>n, 0, 1, 2, <short>_SPLINE_EST_DERIV_, errmsg) == _FAILURE_:
+            raise CosmoSevereError(errmsg)
+        if array_integrate_all_trapzd_or_spline(&table[0, 0], 3, <int>n, 0, 0, 1, 2, &result, errmsg) == _FAILURE_:
+            raise CosmoSevereError(errmsg)
+        rv[j] = result
+    return res.reshape(lead) if lead else res[0]
+
 class CosmoError(Exception):
     def __init__(self, message=""):
         self.message = message.decode() if isinstance(message,bytes) else message
@@ -874,8 +908,10 @@ cdef class Class:
         resp : dict
             Arrays of shape (num_bins+1, lmax+1) for 'tt', 'ee', 'te', 'pp', 'tp' (those requested
             in 'output'), and 'ell'. Also 'ell_sparse' (int array): the multipoles at which harmonic
-            evaluated the responses before splining them in ell (set by l_logstep, l_linstep and
-            l_max_scalars).
+            evaluated R[0] (and the C_l) before splining them in ell (set by l_logstep, l_linstep and
+            l_max_scalars); and 'ell_resp' (int array): the multipoles at which it evaluated the bin
+            responses R[1..num_bins], i.e. 'ell_sparse' plus the fine l window (l_max_fine,
+            l_linstep_fine). Without the window the two are equal.
         """
         self.compute(["harmonic"])
         cdef int lmaxR
@@ -916,6 +952,7 @@ cdef class Class:
                     resp[name][index_b, ell] = rcl[index_b*self.hr.ct_size+index]
         resp['ell'] = np.arange(lmax+1)
         resp['ell_sparse'] = np.array([int(self.hr.l[i]) for i in range(self.hr.l_size[self.hr.resp_index_md])], dtype=int)
+        resp['ell_resp'] = np.array([int(self.hr.l_resp[i]) for i in range(self.hr.l_resp_size)], dtype=int)
 
         free(rcl)
 
@@ -923,6 +960,121 @@ cdef class Class:
             raise CosmoSevereError(self.hr.error_message)
 
         return resp
+
+    def harmonic_kernels(self, l_min=None, l_max=None, q_max=None):
+        """
+        Harmonic transfer kernels Delta_l(q) of the scalar adiabatic mode
+
+        Requires harmonic_kernel_export = yes (flat models only). Returns the transfer
+        functions that the harmonic module integrates, on its own grids, so that the
+        unlensed C_l of any primordial spectrum P(q) (dimensionless, including A_s) are
+
+            C^{XY}_l = int dq (4 pi / q) P(q) Delta^X_l(q) Delta^Y_l(q),
+
+        for XY in TT, EE, TE (symmetrised) and pp (phi phi), with q = k in 1/Mpc. Harmonic
+        evaluates this integral at each multipole of 'ell' by splining the integrand in q
+        (first derivatives estimated at the edges) and integrating the spline over the whole
+        grid; _class_spline_integral(q, integrand) reproduces that quadrature. For pp at
+        l > ell_limber_switch (when the full Limber scheme is on), harmonic uses
+        'q_limber' / 'Delta_phi_limber' instead of 'q' / 'Delta_phi'.
+
+        Rows beyond the l_max of a spectrum are zero. Multipoles added by the fine l window
+        (ell_is_coarse False) are zero above q_max_fine when q_max_fine > 0.
+
+        Parameters
+        ----------
+        l_min, l_max : int, optional
+            Return only the multipoles l_min <= l <= l_max (chunked access; only the chunk is
+            copied). Default: all.
+        q_max : float, optional
+            Return only q <= q_max (also applied to q_limber). Default: q_max_fine if it is
+            set, else the whole grid; pass np.inf for the whole grid.
+
+        Returns
+        -------
+        kernels : dict
+            'ell' (int, (n_l,)), 'ell_is_coarse' (bool, (n_l,)), 'q' ((n_q,)), 'Delta_T'
+            (T0+T1+T2, as combined by harmonic), 'Delta_E', 'Delta_phi' ((n_l, n_q), those
+            requested through tCl, pCl, lCl), 'q_limber' and 'Delta_phi_limber' ((n_l,
+            n_q_limber), or None without the full Limber scheme), 'ell_limber_switch' (None
+            without Limber) and 'q_max_fine'.
+        """
+        self.compute(["harmonic"])
+        if not self.tr.has_kernel_export:
+            raise CosmoSevereError("Kernels not exported: set harmonic_kernel_export = yes")
+
+        cdef int md = self.pt.index_md_scalars
+        cdef int ic = self.pt.index_ic_ad
+        cdef int ic_size = self.pt.ic_size[md]
+        cdef int tt_size = self.tr.tt_size[md]
+        cdef int l_size = self.tr.l_size[md]
+        cdef Py_ssize_t q_size = self.tr.q_size
+        cdef Py_ssize_t q_size_limber = self.tr.q_size_limber
+        cdef double[:] view
+        cdef int[:] lview = <int[:l_size]> self.tr.l
+        cdef short[:] cview = <short[:l_size]> self.tr.l_is_coarse
+        cdef double[:] qview = <double[:q_size]> self.tr.q
+
+        ell = np.array(lview, dtype=int)
+        ell_is_coarse = np.array(cview, dtype=bool)
+        q = np.array(qview, dtype=np.double)
+
+        i0 = 0 if l_min is None else int(np.searchsorted(ell, l_min, side='left'))
+        i1 = l_size if l_max is None else int(np.searchsorted(ell, l_max, side='right'))
+        if q_max is None:
+            q_max = self.pr.q_max_fine if self.pr.q_max_fine > 0. else np.inf
+        nq = int(np.searchsorted(q, q_max, side='right'))
+
+        view = <double[:ic_size*tt_size*l_size*q_size]> self.tr.transfer[md]
+        T = np.asarray(view).reshape(ic_size, tt_size, l_size, q_size)[ic]
+
+        out = {'ell': ell[i0:i1], 'ell_is_coarse': ell_is_coarse[i0:i1], 'q': q[:nq],
+               'q_max_fine': self.pr.q_max_fine}
+        if self.pt.has_cl_cmb_temperature:
+            out['Delta_T'] = (T[self.tr.index_tt_t0, i0:i1, :nq]
+                              + T[self.tr.index_tt_t1, i0:i1, :nq]
+                              + T[self.tr.index_tt_t2, i0:i1, :nq])
+        if self.pt.has_cl_cmb_polarization:
+            out['Delta_E'] = np.array(T[self.tr.index_tt_e, i0:i1, :nq])
+        if self.pt.has_cl_cmb_lensing_potential:
+            out['Delta_phi'] = np.array(T[self.tr.index_tt_lcmb, i0:i1, :nq])
+
+        out['q_limber'] = None
+        out['Delta_phi_limber'] = None
+        out['ell_limber_switch'] = None
+        if self.tr.do_lcmb_full_limber and self.pt.has_cl_cmb_lensing_potential:
+            qview = <double[:q_size_limber]> self.tr.q_limber
+            q_limber = np.array(qview, dtype=np.double)
+            nql = int(np.searchsorted(q_limber, q_max, side='right'))
+            view = <double[:ic_size*tt_size*l_size*q_size_limber]> self.tr.transfer_limber[md]
+            TL = np.asarray(view).reshape(ic_size, tt_size, l_size, q_size_limber)[ic]
+            out['q_limber'] = q_limber[:nql]
+            out['Delta_phi_limber'] = np.array(TL[self.tr.index_tt_lcmb, i0:i1, :nql])
+            out['ell_limber_switch'] = self.pr.l_switch_limber
+
+        return out
+
+    def binned_basis(self, k, int index_b):
+        """
+        Basis function b_index_b(k) of the binned primordial spectrum (dimensionless,
+        without A_s), as used by binned_cl_responses: b_0 is the power law, b_1..b_num_bins
+        the bins. k in 1/Mpc, scalar or array.
+        """
+        self.compute(["primordial"])
+        if self.pm.binned_index_md < 0:
+            raise CosmoSevereError("binned_basis requires Pk_ini_type = binned_Pk with adiabatic scalars")
+        if index_b < 0 or index_b > self.pm.num_bins:
+            raise CosmoSevereError("index_b must be in 0..num_bins=%d" % self.pm.num_bins)
+        kk = np.atleast_1d(np.asarray(k, dtype=np.double))
+        out = np.empty_like(kk)
+        cdef double val
+        cdef Py_ssize_t i
+        for i in range(kk.shape[0]):
+            if primordial_binned_basis_at_k(&self.pm, self.pm.binned_index_md, self.pm.binned_index_ic1_ic2,
+                                            kk[i], index_b, &val) == _FAILURE_:
+                raise CosmoSevereError(self.pm.error_message)
+            out[i] = val
+        return out if np.ndim(k) else out[0]
 
     def lensed_cl(self, lmax=-1,nofail=False):
         """

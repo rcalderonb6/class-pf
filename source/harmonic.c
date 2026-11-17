@@ -278,6 +278,10 @@ int harmonic_init(
   phr->resp_index_md = -1;
   phr->cl_resp = NULL;
   phr->ddcl_resp = NULL;
+  phr->cl_resp0 = NULL;
+  phr->ddcl_resp0 = NULL;
+  phr->l_resp = NULL;
+  phr->l_resp_size = 0;
 
   /** - check that we really want to compute at least one spectrum */
 
@@ -361,6 +365,9 @@ int harmonic_free(
     if (phr->has_binned_responses == _TRUE_) {
       free(phr->cl_resp);
       free(phr->ddcl_resp);
+      free(phr->cl_resp0);
+      free(phr->ddcl_resp0);
+      free(phr->l_resp);
     }
 
     for (index_md=0; index_md < phr->md_size; index_md++)
@@ -693,6 +700,9 @@ int harmonic_cls(
   int index_l;
   int index_ct;
   int cl_integrand_num_columns;
+  int * index_l_coarse; /* index_l_coarse[index_l]: index in phr->l of transfer multipole ptr->l[index_l], or -1 if it was only added by the fine l window */
+  int index_l_out;
+  int has_resp_md;
 
   /** - allocate pointers to arrays where results will be stored */
 
@@ -700,7 +710,22 @@ int harmonic_cls(
   class_alloc(phr->cl,sizeof(double *)*phr->md_size,phr->error_message);
   class_alloc(phr->ddcl,sizeof(double *)*phr->md_size,phr->error_message);
 
-  phr->l_size_max = ptr->l_size_max;
+  /** - the C_l are computed and splined on the coarse (l_logstep,
+      l_linstep) grid only, which is the whole transfer grid unless the
+      fine l window is on (l_max_fine > 0). The multipoles added by the
+      window are used only for the bin responses (see below). */
+
+  class_alloc(index_l_coarse,sizeof(int)*ptr->l_size_max,phr->error_message);
+  phr->l_size_max = 0;
+  for (index_l=0; index_l < ptr->l_size_max; index_l++) {
+    if (ptr->l_is_coarse[index_l] == _TRUE_) {
+      index_l_coarse[index_l] = phr->l_size_max;
+      phr->l_size_max++;
+    }
+    else {
+      index_l_coarse[index_l] = -1;
+    }
+  }
   class_alloc(phr->l,sizeof(double)*phr->l_size_max,phr->error_message);
 
   /** - binned-P(k) responses: one extra C_l per basis function b_0 ... b_N of the binned
@@ -714,11 +739,16 @@ int harmonic_cls(
     phr->has_binned_responses = _TRUE_;
     phr->resp_size = ppm->num_bins + 1;
     phr->resp_index_md = ppm->binned_index_md;
+    class_test((ppr->q_max_fine > 0.) && (ppr->q_max_fine < ppm->k_max_bin),
+               phr->error_message,
+               "q_max_fine=%e is smaller than k_max_bin=%e: the bin responses at the multipoles of the fine l window would be truncated",
+               ppr->q_max_fine,ppm->k_max_bin);
   }
 
   /** - store values of l */
-  for (index_l=0; index_l < phr->l_size_max; index_l++) {
-    phr->l[index_l] = (double)ptr->l[index_l];
+  for (index_l=0; index_l < ptr->l_size_max; index_l++) {
+    if (index_l_coarse[index_l] >= 0)
+      phr->l[index_l_coarse[index_l]] = (double)ptr->l[index_l];
   }
 
   /** - loop over modes (scalar, tensors, etc). For each mode: */
@@ -727,7 +757,12 @@ int harmonic_cls(
 
     /** - --> (a) store number of l values for this mode */
 
-    phr->l_size[index_md] = ptr->l_size[index_md];
+    phr->l_size[index_md] = 0;
+    for (index_l=0; index_l < ptr->l_size[index_md]; index_l++)
+      if (index_l_coarse[index_l] >= 0)
+        phr->l_size[index_md]++;
+
+    has_resp_md = ((phr->has_binned_responses == _TRUE_) && (index_md == phr->resp_index_md)) ? _TRUE_ : _FALSE_;
 
     /** - --> (b) allocate arrays where results will be stored */
 
@@ -735,9 +770,17 @@ int harmonic_cls(
     class_alloc(phr->ddcl[index_md],sizeof(double)*phr->l_size[index_md]*phr->ct_size*phr->ic_ic_size[index_md],phr->error_message);
     cl_integrand_num_columns = 1+phr->ct_size*2; /* one for k, ct_size for each type, ct_size for each second derivative of each type */
 
-    if ((phr->has_binned_responses == _TRUE_) && (index_md == phr->resp_index_md)) {
-      class_alloc(phr->cl_resp,sizeof(double)*phr->l_size[index_md]*phr->resp_size*phr->ct_size,phr->error_message);
-      class_alloc(phr->ddcl_resp,sizeof(double)*phr->l_size[index_md]*phr->resp_size*phr->ct_size,phr->error_message);
+    /* responses: b_0 (power law, all k) on the coarse grid like the
+       C_l; the bins b_1..b_N on the full transfer grid l_resp */
+    if (has_resp_md == _TRUE_) {
+      phr->l_resp_size = ptr->l_size[index_md];
+      class_alloc(phr->l_resp,sizeof(double)*phr->l_resp_size,phr->error_message);
+      for (index_l=0; index_l < phr->l_resp_size; index_l++)
+        phr->l_resp[index_l] = (double)ptr->l[index_l];
+      class_alloc(phr->cl_resp0,sizeof(double)*phr->l_size[index_md]*phr->ct_size,phr->error_message);
+      class_alloc(phr->ddcl_resp0,sizeof(double)*phr->l_size[index_md]*phr->ct_size,phr->error_message);
+      class_alloc(phr->cl_resp,sizeof(double)*phr->l_resp_size*(phr->resp_size-1)*phr->ct_size,phr->error_message);
+      class_alloc(phr->ddcl_resp,sizeof(double)*phr->l_resp_size*(phr->resp_size-1)*phr->ct_size,phr->error_message);
     }
 
     /** - --> (c) loop over initial conditions */
@@ -757,6 +800,13 @@ int harmonic_cls(
               This elementary task is assigned to harmonic_compute_cl() */
 
           for (index_l=0; index_l < ptr->l_size[index_md]; index_l++) {
+
+            index_l_out = index_l_coarse[index_l];
+
+            /* multipoles of the fine window: bin responses only */
+            if ((index_l_out < 0) &&
+                ((has_resp_md == _FALSE_) || (index_ic1_ic2 != ppm->binned_index_ic1_ic2)))
+              continue;
 
             class_run_parallel(=,
 
@@ -790,32 +840,35 @@ int harmonic_cls(
                           ptr->tt_size[index_md]*sizeof(double),
                           phr->error_message);
 
-              class_call(harmonic_compute_cl(ppr,
-                                             pba,
-                                             ppt,
-                                             ptr,
-                                             ppm,
-                                             phr,
-                                             index_md,
-                                             index_ic1,
-                                             index_ic2,
-                                             index_l,
-                                             cl_integrand_num_columns,
-                                             cl_integrand,
-                                             cl_integrand_limber,
-                                             primordial_pk,
-                                             transfer_ic1,
-                                             transfer_ic2,
-                                             -1),
-                         phr->error_message,
-                         phr->error_message);
+              if (index_l_out >= 0) {
+                class_call(harmonic_compute_cl(ppr,
+                                               pba,
+                                               ppt,
+                                               ptr,
+                                               ppm,
+                                               phr,
+                                               index_md,
+                                               index_ic1,
+                                               index_ic2,
+                                               index_l,
+                                               index_l_out,
+                                               cl_integrand_num_columns,
+                                               cl_integrand,
+                                               cl_integrand_limber,
+                                               primordial_pk,
+                                               transfer_ic1,
+                                               transfer_ic2,
+                                               -1),
+                           phr->error_message,
+                           phr->error_message);
+              }
 
-              /* same k-integral with P(k) replaced by each basis function */
-              if ((phr->has_binned_responses == _TRUE_) &&
-                  (index_md == phr->resp_index_md) &&
+              /* same k-integral with P(k) replaced by each basis function
+                 (b_0, the power law, on the coarse grid only) */
+              if ((has_resp_md == _TRUE_) &&
                   (index_ic1_ic2 == ppm->binned_index_ic1_ic2)) {
                 int index_b;
-                for (index_b = 0; index_b < phr->resp_size; index_b++) {
+                for (index_b = ((index_l_out >= 0) ? 0 : 1); index_b < phr->resp_size; index_b++) {
                   class_call(harmonic_compute_cl(ppr,
                                                  pba,
                                                  ppt,
@@ -826,6 +879,7 @@ int harmonic_cls(
                                                  index_ic1,
                                                  index_ic2,
                                                  index_l,
+                                                 index_l_out,
                                                  cl_integrand_num_columns,
                                                  cl_integrand,
                                                  cl_integrand_limber,
@@ -855,7 +909,7 @@ int harmonic_cls(
 
           /* set non-diagonal coefficients to zero if pair of ic's uncorrelated */
 
-          for (index_l=0; index_l < ptr->l_size[index_md]; index_l++) {
+          for (index_l=0; index_l < phr->l_size[index_md]; index_l++) {
             for (index_ct=0; index_ct<phr->ct_size; index_ct++) {
               phr->cl[index_md]
                 [(index_l * phr->ic_ic_size[index_md] + index_ic1_ic2) * phr->ct_size + index_ct]
@@ -882,11 +936,20 @@ int harmonic_cls(
                phr->error_message,
                phr->error_message);
 
-    if ((phr->has_binned_responses == _TRUE_) && (index_md == phr->resp_index_md)) {
+    if (has_resp_md == _TRUE_) {
       class_call(array_spline_table_lines(phr->l,
                                           phr->l_size[index_md],
+                                          phr->cl_resp0,
+                                          phr->ct_size,
+                                          phr->ddcl_resp0,
+                                          _SPLINE_EST_DERIV_,
+                                          phr->error_message),
+                 phr->error_message,
+                 phr->error_message);
+      class_call(array_spline_table_lines(phr->l_resp,
+                                          phr->l_resp_size,
                                           phr->cl_resp,
-                                          phr->resp_size*phr->ct_size,
+                                          (phr->resp_size-1)*phr->ct_size,
                                           phr->ddcl_resp,
                                           _SPLINE_EST_DERIV_,
                                           phr->error_message),
@@ -894,6 +957,8 @@ int harmonic_cls(
                  phr->error_message);
     }
   }
+
+  free(index_l_coarse);
 
   return _SUCCESS_;
 
@@ -967,6 +1032,7 @@ int harmonic_cl_resp_at_l(
   int index_b;
   int index_ct;
   int index_md;
+  double * cl_bins;
 
   class_test(phr->has_binned_responses == _FALSE_,
              phr->error_message,
@@ -974,31 +1040,52 @@ int harmonic_cl_resp_at_l(
 
   index_md = phr->resp_index_md;
 
+  /* b_0 (power law) on the coarse grid phr->l */
   if ((int)l <= phr->l[phr->l_size[index_md]-1]) {
-
     class_call(array_interpolate_spline(phr->l,
                                         phr->l_size[index_md],
-                                        phr->cl_resp,
-                                        phr->ddcl_resp,
-                                        phr->resp_size*phr->ct_size,
+                                        phr->cl_resp0,
+                                        phr->ddcl_resp0,
+                                        phr->ct_size,
                                         l,
                                         &last_index,
                                         cl_resp,
-                                        phr->resp_size*phr->ct_size,
+                                        phr->ct_size,
                                         phr->error_message),
                phr->error_message,
                phr->error_message);
-
-    /* set to zero for the types such that l > l_max */
-    for (index_b=0; index_b<phr->resp_size; index_b++)
-      for (index_ct=0; index_ct<phr->ct_size; index_ct++)
-        if ((int)l > phr->l_max_ct[index_md][index_ct])
-          cl_resp[index_b*phr->ct_size+index_ct] = 0.;
   }
   else {
-    for (index_b=0; index_b<phr->resp_size*phr->ct_size; index_b++)
-      cl_resp[index_b] = 0.;
+    for (index_ct=0; index_ct<phr->ct_size; index_ct++)
+      cl_resp[index_ct] = 0.;
   }
+
+  /* b_1..b_N on the full grid phr->l_resp (coarse + fine window) */
+  cl_bins = cl_resp + phr->ct_size;
+  if ((int)l <= phr->l_resp[phr->l_resp_size-1]) {
+    class_call(array_interpolate_spline(phr->l_resp,
+                                        phr->l_resp_size,
+                                        phr->cl_resp,
+                                        phr->ddcl_resp,
+                                        (phr->resp_size-1)*phr->ct_size,
+                                        l,
+                                        &last_index,
+                                        cl_bins,
+                                        (phr->resp_size-1)*phr->ct_size,
+                                        phr->error_message),
+               phr->error_message,
+               phr->error_message);
+  }
+  else {
+    for (index_b=0; index_b<(phr->resp_size-1)*phr->ct_size; index_b++)
+      cl_bins[index_b] = 0.;
+  }
+
+  /* set to zero for the types such that l > l_max */
+  for (index_b=0; index_b<phr->resp_size; index_b++)
+    for (index_ct=0; index_ct<phr->ct_size; index_ct++)
+      if ((int)l > phr->l_max_ct[index_md][index_ct])
+        cl_resp[index_b*phr->ct_size+index_ct] = 0.;
 
   return _SUCCESS_;
 }
@@ -1017,7 +1104,8 @@ int harmonic_cl_resp_at_l(
  * @param index_md      Input: index of mode under consideration
  * @param index_ic1     Input: index of first initial condition in the correlator
  * @param index_ic2     Input: index of second initial condition in the correlator
- * @param index_l       Input: index of multipole under consideration
+ * @param index_l       Input: index of multipole under consideration in the transfer grid ptr->l
+ * @param index_l_out   Input: index of the same multipole in the C_l grid phr->l (-1 if it was only added by the fine l window; then only index_basis >= 1 is allowed)
  * @param cl_integrand_num_columns Input: number of columns in cl_integrand
  * @param cl_integrand  Input: an allocated workspace
  * @param cl_integrand_limber  Input: an allocated workspace for full Limber calculation
@@ -1038,6 +1126,7 @@ int harmonic_compute_cl(
                         int index_ic1,
                         int index_ic2,
                         int index_l,
+                        int index_l_out,
                         int cl_integrand_num_columns,
                         double * cl_integrand,
                         double * cl_integrand_limber,
@@ -1072,17 +1161,21 @@ int harmonic_compute_cl(
   double l;
   double * cl_out; /* where the C_l of all types are stored, cl_out[index_ct] */
 
-  l = phr->l[index_l];
+  l = (double)ptr->l[index_l];
 
   index_ic1_ic2 = index_symmetric_matrix(index_ic1,index_ic2,phr->ic_size[index_md]);
 
   /* index_basis < 0: usual C_l with the primordial spectrum. index_basis >= 0: response
      C_l with P(k) replaced by basis function index_basis of the binned spectrum. */
   if (index_basis < 0) {
-    cl_out = phr->cl[index_md] + (index_l * phr->ic_ic_size[index_md] + index_ic1_ic2) * phr->ct_size;
+    cl_out = phr->cl[index_md] + (index_l_out * phr->ic_ic_size[index_md] + index_ic1_ic2) * phr->ct_size;
+  }
+  else if (index_basis == 0) {
+    cl_out = phr->cl_resp0 + index_l_out * phr->ct_size;
   }
   else {
-    cl_out = phr->cl_resp + (index_l * phr->resp_size + index_basis) * phr->ct_size;
+    /* the bins live on the full transfer grid, l_resp[index_l] = ptr->l[index_l] */
+    cl_out = phr->cl_resp + (index_l * (phr->resp_size-1) + index_basis-1) * phr->ct_size;
   }
 
   if (ppt->has_cl_number_count == _TRUE_ && _scalars_) {
